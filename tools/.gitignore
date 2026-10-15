@@ -1,0 +1,3 @@
+osm-cache/
+__pycache__/
+.venv/
