@@ -28,6 +28,8 @@ The map (see area.py) is cut into 1 km tiles. For each tile i_j this writes
                    short of an intersection at that end
     jn intersections [x*10, z*10, radius*10]
     cw crosswalks  [x*10, z*10, angle of the street*100, street width*10]
+    hx hero buildings, modelled in detail by hero_house.py (see there); they replace the ordinary
+                   buildings, houses, garages and trees inside their outline
 and for the whole map
   index.json   bounds, palettes, bridges and the main-street routes traffic drives;
                bridges are deck pieces [ax, az, bx, bz, width, height at a*10, height at b*10, pier at a]
@@ -914,8 +916,35 @@ data = {}
 
 
 def tile_data(x, z):
-    return data.setdefault(tile_of(x, z), dict(b=[], h=[], g=[], t=[], f=[], s=[], sn=[], rd=[], jn=[], cw=[]))
+    return data.setdefault(tile_of(x, z), dict(b=[], h=[], g=[], t=[], f=[], s=[], sn=[], rd=[], jn=[], cw=[], hx=[]))
 
+
+# Hero buildings (hero_house.py): modelled in detail, in place of whatever ordinary building, house,
+# garage or tree stood inside their outline.
+heroes = [json.load(open(p)) for p in sorted(glob.glob(os.path.join(HERE, 'heroes', '*.json')))]
+
+
+def in_hero(x, z):
+    for hero in heroes:
+        for ring in hero['rings']:
+            inside = False
+            for (ax, az), (bx_, bz_) in zip(ring, ring[1:] + ring[:1]):
+                if (az > z) != (bz_ > z) and x < ax + (z - az) * (bx_ - ax) / (bz_ - az):
+                    inside = not inside
+            if inside:
+                return True
+    return False
+
+
+if heroes:
+    n0 = len(solids) + len(houses) + len(boxes) + len(trees)
+    solids = [s for s in solids if not in_hero(s['cx'], s['cz'])]
+    houses = [h for h in houses if not in_hero(h[0], h[1])]
+    boxes = [b for b in boxes if not in_hero(b[0], b[1])]
+    trees = [t for t in trees if not in_hero(t[0], t[1])]
+    for hero in heroes:
+        tile_data(hero['x'], hero['z'])['hx'].append({k: v for k, v in hero.items() if k != 'name'})
+    print('hero buildings', [h['name'] for h in heroes], 'replaced', n0 - len(solids) - len(houses) - len(boxes) - len(trees), flush=True)
 
 for s in solids:
     rec = [s['fac'], widx[s['tint']], mi(s['h'] * 10), mi(s['h0'] * 10), s['flags'], 1 + len(s['holes'])]
@@ -993,7 +1022,7 @@ for j in range(NJ):
         img.resize((1024, 1024), Image.LANCZOS).save(name + '.jpg', quality=84, optimize=True, progressive=True)
         img.resize((512, 512), Image.LANCZOS).save(name + '-s.jpg', quality=84, optimize=True, progressive=True)
         overview.paste(img.resize((OV, OV), Image.LANCZOS), (i * OV, j * OV))
-        json.dump(data.get((i, j), dict(b=[], h=[], g=[], t=[], f=[], s=[], sn=[], rd=[], jn=[], cw=[])), open(name + '.json', 'w'), separators=(',', ':'))
+        json.dump(data.get((i, j), dict(b=[], h=[], g=[], t=[], f=[], s=[], sn=[], rd=[], jn=[], cw=[], hx=[])), open(name + '.json', 'w'), separators=(',', ':'))
     print('row', j, flush=True)
 overview.save(os.path.join(OUT, 'overview.jpg'), quality=84, optimize=True, progressive=True)
 

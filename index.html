@@ -1331,6 +1331,24 @@ function signGeo(G, B, s, atlas) {
   });
 }
 
+/**
+ * A hero building (tools/mpls-drive/hero_house.py): one real building modelled in detail from the
+ * full LiDAR survey and an aerial photo, triangle by triangle, standing on the ground at its centre.
+ */
+function heroGeo(G, S, hx) {
+  const base = groundH(hx.x, hx.z);
+  for (const ring of hx.rings) for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    addSolid(S, a[0], a[1], b[0], b[1], 0, base + hx.top);
+  }
+  const cols = hx.col.map(c => new THREE.Color(c)), p = hx.p, uv = hx.uv;
+  G.y0 = base; G.foot = 0;
+  const P = (k) => [p[k * 3] / 100, p[k * 3 + 1] / 100, p[k * 3 + 2] / 100], U = (k) => [uv[k * 2] / 100, uv[k * 2 + 1] / 100];
+  for (let t = 0; t < hx.f.length / 2; t++) {
+    G.tri(P(t * 3), P(t * 3 + 1), P(t * 3 + 2), U(t * 3), U(t * 3 + 1), U(t * 3 + 2), hx.f[t * 2], cols[hx.f[t * 2 + 1]]);
+  }
+}
+
 /** Lay a tile's big buildings into 500 m pieces and set up the rest to be built when the camera comes near. */
 function buildChunkCity(ch, data) {
   const pieces = new Map();
@@ -1351,6 +1369,7 @@ function buildChunkCity(ch, data) {
     building(null, S, b.slice());
     building(pieceAt(cx / n, cz / n).G, null, b.slice());
   }
+  for (const hx of data.hx || []) heroGeo(pieceAt(hx.x, hx.z).G, S, hx);
   // Collision for everything now; the shapes of the small things wait until they're near.
   const footprint = (x, z, ang, W, D, H) => {
     const P = localFrame(x, z, ang);
