@@ -197,7 +197,7 @@ def is_bridge(t):
     return t.get('bridge') not in (None, 'no') and not str(t.get('layer', '0')).startswith('-')
 
 
-# Footpaths, bike paths and trails: the ones round the lakes, through the parks, along the river.
+# Footpaths, bike paths and trails (the ones round the lakes, through the parks, along the river), and alleys.
 # Sidewalks and crossings along streets are left out (the streets bring their own).
 paths = []
 for e in load('paths'):
@@ -206,7 +206,7 @@ for e in load('paths'):
             or t.get('indoor') == 'yes' or t.get('tunnel') in ('yes', 'building_passage')
             or str(t.get('layer', '0')).startswith('-') or not e.get('geometry')):
         continue
-    w = 3.2 if t.get('highway') == 'cycleway' or t.get('bicycle') == 'designated' else 2.4
+    w = 4.2 if t.get('service') == 'alley' else 3.2 if t.get('highway') == 'cycleway' or t.get('bicycle') == 'designated' else 2.4
     paths.append(([m(p['lat'], p['lon']) for p in e['geometry']], w, t))
 
 # Where the pavement is (streets and paths on the ground, not bridges or tunnels), in 20 m cells,
@@ -529,8 +529,8 @@ for e in load('barriers'):
         fences.append((kind, run))
 print('fences cut where they cross streets and paths', fence_cuts, flush=True)
 
-for pts, w, t in paths:                          # trails, under the streets they cross
-    line(pts, w, 'walk')
+for pts, w, t in paths:                          # trails and alleys, under the streets they cross
+    line(pts, w, 'road' if t.get('service') == 'alley' else 'walk')
 for _, hw, pts, t, _ in roads:                    # a curb along the edge (the sidewalks are 3D, beyond a grass boulevard)
     if hw not in ('motorway', 'trunk', 'motorway_link', 'trunk_link'):
         line(pts, WIDTH[hw] + 1.2, 'curb')

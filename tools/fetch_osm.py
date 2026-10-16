@@ -6,7 +6,7 @@
 Downloads Geofabrik's daily Minnesota extract into osm-cache/ (about 290 MB,
 skipped if already there), then pulls out everything inside the map (see
 area.py) into small JSON files shaped like Overpass API `out geom;` results:
-roads_all, paths (footways, cycleways and trails), water, green, rail, bld_all, barriers (fences, walls,
+roads_all, paths (footways, cycleways, trails and alleys), water, green, rail, bld_all, barriers (fences, walls,
 hedges), paved (surface parking lots), plus names.json with the centres of a
 few named places used as landmarks, and search.json with every street address
 and named place, for the address search. Delete osm-cache/ to start fresh.
@@ -64,7 +64,8 @@ class Cut(osmium.SimpleHandler):
     def way(self, w):
         t = w.tags
         hw, rail, ww = t.get('highway'), t.get('railway'), t.get('waterway')
-        bucket = ('roads_all' if hw in HW else 'paths' if hw in PATHS else 'rail' if rail == 'rail' else 'water' if ww == 'river'
+        alley = hw == 'service' and t.get('service') == 'alley'
+        bucket = ('roads_all' if hw in HW else 'paths' if hw in PATHS or alley else 'rail' if rail == 'rail' else 'water' if ww == 'river'
                   else 'barriers' if t.get('barrier') in ('fence', 'wall', 'hedge', 'retaining_wall') else None)
         if not bucket:
             return
