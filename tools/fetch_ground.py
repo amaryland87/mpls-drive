@@ -11,8 +11,13 @@ nodes at X0 + i * STEP, Z0 + j * STEP. bake_tiles.py ships it to the game.
 
 Points classed bridge deck (17) are kept too: the lowest in each 5 m cell (the deck, not its railings
 or arches), as deck (nan where there is none), for bake_tiles.py to set the bridges' heights from.
+Some bridges the survey left unclassified (1), like the Irene Hixon Whitney footbridge over I-94, so
+along every OpenStreetMap bridge the unclassified points are kept as well, and each 5 m cell there
+takes the lowest height well over the ground that its points crowd thickly round (a deck is one flat
+sheet of returns; its railings, trusses and the cars under it are thin), as deck1, for where there
+is no deck. Trees crowd too, so bake_tiles.py is careful with these.
 """
-import concurrent.futures, json, os, sys
+import concurrent.futures, json, math, os, sys
 
 import laspy
 import numpy as np
@@ -20,6 +25,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from area import LAT0, LON0, MX, MY, X0, X1, Z0, Z1
+from footprints import load_osm, m
 
 CACHE = os.path.join(HERE, 'osm-cache')
 LAS = os.path.join(CACHE, 'lidar')
@@ -27,12 +33,50 @@ R = 6378137.0
 FINE = 5                      # metres per cell while gathering
 STEP = 10                     # metres between the nodes shipped to the game
 NX, NZ = (X1 - X0) // FINE + 1, (Z1 - Z0) // FINE + 1
+ON_BRIDGE = None              # the 5 m cells along OpenStreetMap's bridges, set in each worker
+
+
+def bridge_cells():
+    """Flat indices of the 5 m cells along the roads and paths OpenStreetMap marks as bridges."""
+    lines = []
+    for pattern in ('roads_*', 'paths'):
+        for e in load_osm(pattern):
+            t = e.get('tags', {})
+            if t.get('bridge') in (None, 'no') or str(t.get('layer', '0')).startswith('-') or not e.get('geometry'):
+                continue
+            lines.append([m(p['lat'], p['lon']) for p in e['geometry']])
+    on = np.zeros(NX * NZ, bool)
+    for pts in lines:
+        for a, b in zip(pts, pts[1:]):
+            n = max(1, int(math.hypot(b[0] - a[0], b[1] - a[1]) / 2))
+            for q in range(n + 1):
+                x, z = a[0] + (b[0] - a[0]) * q / n, a[1] + (b[1] - a[1]) * q / n
+                i, j = round((x - X0) / FINE), round((z - Z0) / FINE)
+                if 0 <= i < NX and 0 <= j < NZ:
+                    on[j * NX + i] = True
+    return on
+
+
+def set_bridge_cells(on):
+    global ON_BRIDGE
+    ON_BRIDGE = on
+
+
+def crowd(h, g):
+    """The lowest height, 3 m or more over the ground g, that a cell's points crowd thickly round (within
+    0.6 m), or nan if none does: the deck, under its railings, trusses and lamps, over the traffic below."""
+    h = np.sort(h[h > g + 3])
+    if len(h) < 4:
+        return np.nan
+    n = np.searchsorted(h, h + 0.6, side='right') - np.arange(len(h))
+    k = np.flatnonzero(n >= max(4, 0.2 * len(h)))
+    return float(np.median(h[k[0]:k[0] + n[k[0]]])) if len(k) else np.nan
 
 
 def node_sums(k):
     las = laspy.read(os.path.join(LAS, k + '.laz'))
     cls = np.asarray(las.classification)
-    keep = (cls == 2) | (cls == 9) | (cls == 17)
+    keep = (cls == 1) | (cls == 2) | (cls == 9) | (cls == 17)
     if not keep.any():
         return None
     px, py, h, cls = np.asarray(las.x)[keep], np.asarray(las.y)[keep], np.asarray(las.z)[keep], cls[keep]
@@ -53,6 +97,8 @@ def node_sums(k):
     lo = np.full(len(u), np.inf)
     np.minimum.at(lo, inv, h[sel])
     out.append((u, lo))
+    sel = (cls == 1) & ON_BRIDGE[idx]
+    out.append((idx[sel], h[sel].astype(np.float32)))
     return out
 
 
@@ -93,10 +139,12 @@ def main():
     gs, gn = np.zeros(NX * NZ), np.zeros(NX * NZ)
     ws, wn = np.zeros(NX * NZ), np.zeros(NX * NZ)
     deck = np.full(NX * NZ, np.inf)
-    with concurrent.futures.ProcessPoolExecutor() as pool:
+    b_idx, b_h = [], []
+    with concurrent.futures.ProcessPoolExecutor(initializer=set_bridge_cells, initargs=(bridge_cells(),)) as pool:
         for n, res in enumerate(pool.map(node_sums, nodes, chunksize=8)):
             if res:
-                (u, s, c), (wu, wsum, wc), (du, dlo) = res
+                (u, s, c), (wu, wsum, wc), (du, dlo), (bi, bh) = res
+                b_idx.append(bi); b_h.append(bh)
                 np.minimum.at(deck, du, dlo)
                 np.add.at(gs, u, s); np.add.at(gn, u, c)
                 np.add.at(ws, wu, wsum); np.add.at(wn, wu, wc)
@@ -109,12 +157,23 @@ def main():
 
 
     g = blur(fill(g), 1)
+    gf = g.ravel()
     k = STEP // FINE
     out = g[::k, ::k].astype(np.float32)
     print('ground', out.shape, 'from', float(out.min()), 'to', float(out.max()), 'median', float(np.median(out)))
     deck = np.where(np.isfinite(deck), deck, np.nan).reshape(NZ, NX).astype(np.float32)
     print('deck cells', int(np.isfinite(deck).sum()), flush=True)
-    np.savez_compressed(os.path.join(CACHE, 'ground.npz'), h=out, step=STEP, x0=X0, z0=Z0, deck=deck, fine=FINE)
+    b_idx, b_h = np.concatenate(b_idx), np.concatenate(b_h)
+    o = np.argsort(b_idx, kind='stable')
+    b_idx, b_h = b_idx[o], b_h[o]
+    deck1 = np.full(NX * NZ, np.nan, np.float32)
+    cells, starts = np.unique(b_idx, return_index=True)
+    for c, a, b in zip(cells, starts, list(starts[1:]) + [len(b_idx)]):
+        deck1[c] = crowd(b_h[a:b], gf[c])
+    deck1 = deck1.reshape(NZ, NX)
+    print('unclassified deck cells', int(np.isfinite(deck1).sum()), flush=True)
+    np.savez_compressed(os.path.join(CACHE, 'ground.npz'), h=out, step=STEP, x0=X0, z0=Z0, deck=deck, deck1=deck1,
+                        fine=FINE)
 
 
 if __name__ == '__main__':

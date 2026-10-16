@@ -80,10 +80,11 @@ if os.path.exists(_gp):
     GSTEP = int(_g['step'])
     GH_ABS = _g['h'].astype(np.float64)
     DECK, DFINE = (_g['deck'], int(_g['fine'])) if 'deck' in _g else (None, 5)
+    DECK1 = _g['deck1'] if 'deck1' in _g else None
 else:
     GSTEP = 10
     GH_ABS = np.zeros(((Z1 - Z0) // GSTEP + 1, (X1 - X0) // GSTEP + 1))
-    DECK, DFINE = None, 5
+    DECK, DFINE, DECK1 = None, 5, None
 GNZ, GNX = GH_ABS.shape
 E0 = float(np.median(np.concatenate([GH_ABS[0], GH_ABS[-1], GH_ABS[:, 0], GH_ABS[:, -1]])))
 _ex = np.minimum(np.arange(GNX) * GSTEP, (X1 - X0) - np.arange(GNX) * GSTEP)
@@ -97,12 +98,14 @@ def ease(x, z):
     return e * e * (3 - 2 * e)
 
 
-def deck_at(x, z):
-    """The surveyed bridge deck's height at (x, z), like ground()'s, or nan where the survey saw none."""
-    if DECK is None:
+def deck_at(x, z, deck=None):
+    """The surveyed bridge deck's height at (x, z), like ground()'s, or nan where the survey saw none.
+    deck=DECK1 reads the decks the survey left unclassified instead (see fetch_ground.py)."""
+    deck = DECK if deck is None else deck
+    if deck is None:
         return float('nan')
     i, j = int(round((x - X0) / DFINE)), int(round((z - Z0) / DFINE))
-    v = DECK[max(0, j - 1):j + 2, max(0, i - 1):i + 2]
+    v = deck[max(0, j - 1):j + 2, max(0, i - 1):i + 2]
     v = v[np.isfinite(v)]
     return float((np.median(v) - E0) * ease(x, z)) if len(v) else float('nan')
 
@@ -818,6 +821,33 @@ for n, (pts, w) in enumerate(bways):
         cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
     seen_deck = np.array([deck_at(*p) for p in cp])
     ok = np.isfinite(seen_deck)
+    unclassified = False
+    if ok.sum() < 2 and DECK1 is not None:
+        # None classed deck here: the decks the survey left unclassified (see fetch_ground.py). Trees
+        # over a footbridge can pass for one, so a reading counts only up to 11 m over the ground, and
+        # only as high over a nearer end on the ground (not one where other bridges meet it) as a ramp
+        # could climb from there, and they're used only where most of the bridge has them (a deck is
+        # one long sheet; trees come in clumps). Odd ones out (a truck under the deck, the bracing
+        # over it) are put right by their neighbours. The readings stop near the ground, so the ramps
+        # run down from the last of them to the ground at those ends.
+        foot = [(0, ground(*cp[0])) if len(ends.get(pkey(cp[0]), ())) == 1 else None,
+                (cum[-1], ground(*cp[-1])) if len(ends.get(pkey(cp[-1]), ())) == 1 else None]
+        seen_deck = np.array([deck_at(*p, deck=DECK1) for p in cp])
+        for k, p in enumerate(cp):
+            if not (seen_deck[k] - ground(*p) <= 11
+                    and all(abs(seen_deck[k] - h) <= 2 + 0.12 * abs(cum[k] - c) for c, h in filter(None, foot))):
+                seen_deck[k] = np.nan
+        if np.isfinite(seen_deck).mean() < 0.6:
+            seen_deck[:] = np.nan
+        pad = np.pad(seen_deck, 1, mode='edge')
+        with np.errstate(all='ignore'):
+            seen_deck = np.where(np.isfinite(seen_deck), np.nanmedian(np.c_[pad[:-2], pad[1:-1], pad[2:]], axis=1), np.nan)
+        if np.isfinite(seen_deck).sum() >= 2:
+            for e, f in ((0, foot[0]), (-1, foot[1])):
+                if f and not np.isfinite(seen_deck[e]):
+                    seen_deck[e] = f[1]
+        ok = np.isfinite(seen_deck)
+        unclassified = ok.sum() >= 2
     if ok.sum() >= 2:
         hs = np.interp(cum, np.array(cum)[ok], seen_deck[ok])
         hs = np.convolve(np.pad(hs, 1, mode='edge'), [0.25, 0.5, 0.25], mode='valid')
@@ -829,7 +859,7 @@ for n, (pts, w) in enumerate(bways):
             if 0 <= i < GH and 0 <= j < GW and wet[i, j]:
                 hs[n_] = max(hs[n_], ground(*p) + 3)
     hs = [max(h, ground(*p)) for h, p in zip(hs, cp)]
-    chains.append((cp, cw, hs))
+    chains.append((cp, cw, hs, unclassified))
 
 # Build the land up to meet each bridge's ends, as the real approaches are: the survey's ground runs
 # down into the river or freeway the bridge crosses for a little way past its ends.
@@ -847,18 +877,18 @@ def raise_ground(x, z, h, r):
                     GROUND[j, i] = max(GROUND[j, i], round(h, 2))
 
 
-for cp, cw, hs in chains:
+for cp, cw, hs, unclassified in chains:
     for (e, prev, h_end, w) in ((cp[0], cp[1], hs[0], cw[0]), (cp[-1], cp[-2], hs[-1], cw[-1])):
         L = math.hypot(e[0] - prev[0], e[1] - prev[1]) or 1
         ox, oz = (e[0] - prev[0]) / L, (e[1] - prev[1]) / L
         far = ground(e[0] + ox * APPROACH, e[1] + oz * APPROACH)
-        if h_end - ground(*e) > 6:
-            continue                              # no approach on the ground here: leave it be
+        if h_end - ground(*e) > 6 or (unclassified and len(ends.get(pkey(e), ())) > 1):
+            continue                              # no approach on the ground here (or it runs on as another bridge): leave it be
         for t in range(0, APPROACH + 1, 4):
             k = t / APPROACH
             raise_ground(e[0] + ox * t, e[1] + oz * t, h_end + (far - h_end) * k * k * (3 - 2 * k), w / 2 + 2)
 # Piers about every 30 m where the deck is well up, never in the street or path the bridge crosses.
-for cp, cw, hs in chains:
+for cp, cw, hs, _ in chains:
     cum = [0]
     for a, b in zip(cp, cp[1:]):
         cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
