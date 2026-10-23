@@ -3017,6 +3017,7 @@ function createCarFlareMaterial() {
 
 export {
   cityUniforms,
+  evaluateApartmentInterior, // [Mpls Drive] exported for its own facades
   WALL_KINDS,
   createCurtainWallMaterial,
   createPreWarBuildingMaterial,

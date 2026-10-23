@@ -354,7 +354,7 @@ import {
   Fn, uniform, texture, uv, attribute, vertexColor, positionWorld, normalWorld, cameraPosition, instancedBufferAttribute,
   materialRoughness, float, vec2, vec3, vec4, mix, smoothstep, step, clamp as tclamp, max, min, abs, floor, fract, dot,
   normalize, cross, length, sin, round, dFdx, dFdy, select, normalMap, pass, mrt, output, normalView, positionView,
-  roughness, metalness,
+  roughness, metalness, fwidth,
 } from 'three/tsl';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { ClusteredLighting } from 'three/addons/lighting/ClusteredLighting.js';
@@ -363,7 +363,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { LightingSystem } from './nyc/lighting.js';
 import { createPostProcessing } from './nyc/post-processing.js';
 import {
-  cityUniforms, createRoadSurfaceMaterial, createRoadPaintMaterial, createSidewalkMaterial, createCurbMaterial,
+  cityUniforms, evaluateApartmentInterior, createRoadSurfaceMaterial, createRoadPaintMaterial, createSidewalkMaterial, createCurbMaterial,
 } from './nyc/tsl-materials.js';
 import { BODY_SPECS, buildCarGeometry, buildCarProxyGeometry, buildSteerableWheelGeo, createLoftedCarMaterial } from './nyc/actor-models.js';
 import { PersonCrowd, PersonRig } from './nyc/pedestrians.js';
@@ -433,16 +433,15 @@ function canvas2d(w, h = w) {
    Drive adds the light on its unlit map ground and how thick the haze is:
    it has to hide the end of the ~1.5 km of city streamed round the car.   */
 const TIMES = [
-  { id: 'golden', nyc: 'golden', name: 'Golden hour', icon: 'sunset', ground: [1.02, 0.93, 0.8], shadow: 0.5, haze: 0.0011, night: 0, roomDay: 0.28, roadRough: 0.9, wet: 0.12 },
-  { id: 'midday', nyc: 'midday', name: 'Midday', icon: 'sun', ground: [1.0, 1.0, 1.0], shadow: 0.42, haze: 0.001, night: 0, roomDay: 0.35, roadRough: 0.92, wet: 0.04 },
-  { id: 'twilight', nyc: 'twilight', name: 'Blue hour', icon: 'dusk', ground: [0.5, 0.5, 0.62], shadow: 0.25, haze: 0.0012, night: 0.7, roomDay: 0.1, roadRough: 0.55, wet: 0.5 },
-  { id: 'night', nyc: 'midnight', name: 'Night', icon: 'moon', ground: [0.24, 0.26, 0.34], shadow: 0.2, haze: 0.0013, night: 1, roomDay: 0.04, roadRough: 0.5, wet: 0.62 },
+  { id: 'golden', nyc: 'golden', name: 'Golden hour', icon: 'sunset', ground: [1.02, 0.93, 0.8], shadow: 0.5, haze: 0.0011, night: 0, roadRough: 0.9, wet: 0.12 },
+  { id: 'midday', nyc: 'midday', name: 'Midday', icon: 'sun', ground: [1.0, 1.0, 1.0], shadow: 0.42, haze: 0.001, night: 0, roadRough: 0.92, wet: 0.04 },
+  { id: 'twilight', nyc: 'twilight', name: 'Blue hour', icon: 'dusk', ground: [0.5, 0.5, 0.62], shadow: 0.25, haze: 0.0012, night: 0.7, roadRough: 0.55, wet: 0.5 },
+  { id: 'night', nyc: 'midnight', name: 'Night', icon: 'moon', ground: [0.24, 0.26, 0.34], shadow: 0.2, haze: 0.0013, night: 1, roadRough: 0.5, wet: 0.62 },
 ];
 let timeIdx = clamp(TIMES.findIndex(t => t.id === store.get('time', 'golden')), 0, TIMES.length - 1);
 // Shared by Mpls Drive's own materials: how dark it is, and how the unlit map is lit.
 const nightU = uniform(0);
 const groundTintU = uniform(new THREE.Vector3(1, 1, 1));
-const roomDayU = uniform(0.3);
 
 const lighting = new LightingSystem(scene, renderer);
 const hemi = lighting.hemiLight, sun = lighting.sunLight;
@@ -496,7 +495,6 @@ function applyTime(i) {
   grade.applyPreset(T.nyc);
   groundTintU.value.set(...T.ground);
   nightU.value = T.night;
-  roomDayU.value = T.roomDay;
   // After dark the streets have a damp sheen that catches the lamps and the headlights.
   roadMat.roughness = T.roadRough;
   shadowCatcher.material.opacity = T.shadow;
@@ -835,44 +833,10 @@ async function loadFacades() {
 // A standard material whose colour and normal come from the texture array (layer per vertex), with
 // glass made shiny and trim kept untinted by the mask in the normal map's blue channel.
 //
-// Rooms behind the windows (after Slop New York's apartment interiors): each window cell looks into a box room, its
-// back wall, side walls, floor and ceiling found by intersecting the view ray with the room's planes in the wall's own
-// frame (u along the wall, v up, w out of it). By day the rooms are dim; after dark a share of them light up warm (a
-// few cool), more in the shops on the ground floor.
-const roomHash = (p) => {
-  const q = fract(p.mul(vec3(0.1031, 0.103, 0.0973))).toVar();
-  q.addAssign(dot(q, q.yxz.add(33.33)));
-  return fract(q.x.add(q.y).mul(q.z));
-};
-const roomLight = Fn(([cellUV, seed, shop]) => {
-  const N0 = normalize(normalWorld);
-  const V = normalize(cameraPosition.sub(positionWorld));
-  const N = select(dot(N0, V).lessThan(0), N0.negate(), N0);
-  const T0 = cross(vec3(0, 1, 0), N);
-  const T = T0.div(max(length(T0), 1e-4)).toVar();
-  // Which way the texture runs along the wall (the same whichever way the screen's y runs).
-  const su = dot(dFdx(positionWorld), T).mul(dFdx(cellUV.x)).add(dot(dFdy(positionWorld), T).mul(dFdy(cellUV.x)));
-  T.mulAssign(select(su.lessThan(0), -1, 1));
-  // The view ray into the room in cells across and up (bays ~2.6 m, floors ~3.4 m) and metres deep.
-  const dir = vec3(dot(V, T).negate().div(2.6), V.y.negate().div(3.4), min(dot(V, N).negate(), -0.05)).toVar();
-  const depth = 3.2;
-  const cell = floor(cellUV), f = fract(cellUV);
-  const o = vec3(f, 0.0);
-  const tx = vec3(step(0.0, dir.x).sub(o.x).div(dir.x), step(0.0, dir.y).sub(o.y).div(dir.y), float(-depth).div(dir.z));
-  const t = min(min(tx.x, tx.y), tx.z);
-  const hit = o.add(dir.mul(t));
-  const h = roomHash(vec3(cell, 0.0).add(seed.mul(97.0)));
-  const h2 = roomHash(vec3(cell, 5.0).add(seed.mul(53.0)));
-  const wallCol = mix(vec3(0.78, 0.72, 0.62), vec3(0.62, 0.68, 0.72), step(0.6, h2));
-  const backWall = wallCol.mul(step(0.35, fract(hit.x.mul(3.0).add(h2))).mul(step(hit.y, 0.55)).mul(0.25).add(0.75));
-  const floorCeil = select(dir.y.lessThan(0), vec3(0.35, 0.26, 0.18).mul(h.mul(0.2).add(0.8)), vec3(0.92));
-  const col = select(t.equal(tx.z), backWall, select(t.equal(tx.y), floorCeil, wallCol.mul(0.82)));
-  const back = tclamp(hit.z.negate().div(depth), 0.0, 1.0);
-  const lit = step(h, mix(0.0, mix(0.42, 0.85, shop), nightU));
-  const lamp = mix(vec3(1.0, 0.7, 0.42), vec3(0.72, 0.84, 1.0), step(0.86, h2));
-  const pool = float(1.0).sub(length(hit.xy.sub(vec2(0.5, 0.9))).mul(0.4));
-  return col.mul(back.mul(-0.35).add(1.0)).mul(roomDayU.mul(float(1).sub(back).mul(0.45).add(0.55)).add(lit.mul(lamp).mul(pool).mul(mix(1.8, 2.6, shop))));
-});
+// Rooms behind the windows: Slop New York's apartment interiors (nyc/tsl-materials.js), each room two or three bays
+// wide with plaster walls, floorboards and a rug, a door and a picture on the back wall, a ceiling lamp and drapes
+// hung inside the glass, ray-marched from the view; walls run along Mpls Drive's own facade uvs (a bay and a floor per
+// unit). After dark a share of them light up, more of the shops on the ground floor.
 function makeCityMat(extra = {}) {
   const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.92, metalness: 0, side: THREE.DoubleSide, ...extra });
   const la = attribute('la', 'vec2');                    // texture layer, sky occlusion (bytes, normalised)
@@ -882,14 +846,18 @@ function makeCityMat(extra = {}) {
   const nrm = facadeNormalTex.sample(fUV).depth(layer);
   const trim = smoothstep(0.2, 0.45, nrm.b), glass = smoothstep(0.7, 0.9, nrm.b);
   const windowed = glass.mul(step(layer, 5.5));
-  mat.colorNode = tex.rgb.mul(mix(vertexColor().rgb, vec3(1), trim)).mul(la.y).mul(windowed.mul(-0.7).add(1));
+  const shop = step(3.5, layer).mul(step(layer, 4.5));
+  const seed = dot(vertexColor().rgb, vec3(97.1, 53.7, 31.3)).add(layer.mul(7.3));
+  const room = evaluateApartmentInterior(fUV.x.mul(2.6), fUV.y.mul(3.4), fract(fUV), floor(fUV), 2.6, 3.4, seed, 0.62,
+    mix(0.42, 0.85, shop).mul(0.65), vec2(fwidth(fUV.x), fwidth(fUV.y)));
+  const wallCol = tex.rgb.mul(mix(vertexColor().rgb, vec3(1), trim)).mul(la.y);
+  mat.colorNode = mix(wallCol, room.xyz.mul(vec3(0.71, 0.78, 0.75)).mul(0.5), windowed.mul(0.75));
   mat.roughnessNode = mix(materialRoughness, 0.06, glass);
   mat.metalnessNode = mix(0.0, 0.35, glass);
   const nxy = nrm.rg.mul(2).sub(1);
   const nz = max(float(1).sub(dot(nxy, nxy)), 0).sqrt();
   mat.normalNode = normalMap(vec3(nrm.rg, nz.mul(0.5).add(0.5)), vec2(1.4));
-  const shop = step(3.5, layer).mul(step(layer, 4.5));
-  mat.emissiveNode = windowed.mul(roomLight(fUV, vertexColor().rgb.add(layer.mul(0.137)), shop));
+  mat.emissiveNode = room.xyz.mul(room.w).mul(windowed).mul(cityUniforms.uInteriorGlow).mul(0.72);
   return mat;
 }
 const cityMat = makeCityMat();
