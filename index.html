@@ -76,6 +76,9 @@
   .chip span { color: var(--ink-soft); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
   .chip b { font-family: var(--display); font-weight: 600; font-size: 15px; }
   .iconbtn { width: 34px; padding: 0; justify-content: center; }
+  .timebtn { gap: 7px; }
+  .timebtn span { display: flex; color: var(--ink); }
+  .timebtn b { font-size: 13px; }
 
   #toast {
     position: fixed; top: 64px; left: 50%; z-index: 6;
@@ -204,6 +207,8 @@
     .mapwrap { grid-template-columns: 1fr; }
     .places { max-height: 160px; }
     .brand a { display: none; }
+    .timebtn b { display: none; }
+    .timebtn { width: 34px; padding: 0; justify-content: center; }
     .card h1 { font-size: 28px; }
   }
   @media (prefers-reduced-motion: reduce) { #toast, .overlay { transition: none; } }
@@ -226,6 +231,7 @@
   <button class="chip iconbtn" id="searchBtn" type="button" title="Go to an address (/)" aria-label="Go to an address">
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
   </button>
+  <button class="chip timebtn" id="timeBtn" type="button" title="Time of day (T)" aria-label="Change the time of day"><span id="timeIcon" aria-hidden="true"></span><b id="timeName">Golden hour</b></button>
   <button class="chip" id="placesBtn" type="button" title="City map and places to find"><span>Places</span><b id="placesCount">0/0</b></button>
   <button class="chip iconbtn" id="camBtn" type="button" title="Change camera (C)" aria-label="Change camera">
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8a2 2 0 0 1 2-2h2l2-2h6l2 2h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>
@@ -266,6 +272,7 @@
       <span><kbd>Shift</kbd></span><span>Turbo</span>
       <span><kbd>C</kbd> · drag mouse</span><span>Change camera · look around</span>
       <span><kbd>M</kbd> · <kbd>H</kbd> · <kbd>R</kbd></span><span>City map · horn · back to the road</span>
+      <span><kbd>T</kbd></span><span>Golden hour, midday, blue hour or night</span>
     </div>
     <p class="keys-touch">Hold <b>◀ ▶</b> to steer, <b>Gas</b> and <b>Brake</b> on the right (hold Brake to reverse), <b>Drift</b> to slide. Drag the screen to look around and tap the mini map to open the city map.</p>
     <button class="go" id="goBtn" type="button" disabled>Loading the city…</button>
@@ -290,10 +297,22 @@
 </div>
 
 <script type="importmap">
-{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js" } }
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.0/examples/jsm/"
+} }
 </script>
 <script type="module">
 import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { createTreeField } from './nyc/trees.js';
+import { PersonCrowd, PersonRig } from './nyc/people.js';
+import { CityAudio } from './nyc/audio.js';
+import { BODY_SPECS, buildCarGeometry, buildCarProxyGeometry, buildSteerableWheelGeo, createCarMaterial } from './nyc/cars.js';
 
 /* =====================================================================
    Mpls Drive — a third-person toy car loose in Balloon Escape's
@@ -338,7 +357,7 @@ let pixelRatio = Math.min(window.devicePixelRatio, LOW_POWER ? 1.5 : 2);
 renderer.setPixelRatio(pixelRatio);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMappingExposure = 1;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 host.appendChild(renderer.domElement);
@@ -350,49 +369,90 @@ function canvas2d(w, h = w) {
   return { c, g: c.getContext('2d') };
 }
 
+/* ----------------------------- Time of day -----------------------------
+   Four looks, after Slop New York's: the sun's way and colour, the sky, the
+   haze, the light bounced off the city and the camera's grade all move
+   together. Night lights the windows, the street lamps and the car lamps.
+   x east, z south: the evening sun stands in the west-north-west.        */
+const TIMES = [
+  { id: 'golden', name: 'Golden hour', icon: 'sunset',
+    sunDir: [-0.74, 0.34, -0.36], sunColor: '#ffc68c', sunI: 4.2, hemiSky: '#9cbbe0', hemiGround: '#b98e6a', hemiI: 1.9,
+    zenith: '#3263a0', horizon: '#f0cfa8', haze: '#f7dcbc', glow: '#ffb070', fog: '#e2c9ae', fogNear: 120, fogFar: 1300,
+    env: 1.0, ground: [1.02, 0.93, 0.8], shadow: 0.5, night: 0, stars: 0, roomDay: 0.28, roadRough: 0.9,
+    exposure: 1.0, balance: [1.04, 1.0, 0.955], contrast: 1.12, saturation: 1.08, bloom: 0.22, threshold: 1.2 },
+  { id: 'midday', name: 'Midday', icon: 'sun',
+    sunDir: [0.22, 0.86, 0.46], sunColor: '#fff5e8', sunI: 4.4, hemiSky: '#b0d4ff', hemiGround: '#b29a80', hemiI: 1.6,
+    zenith: '#2766b4', horizon: '#c4dcf2', haze: '#dbe8f2', glow: '#fff6e0', fog: '#c9dcee', fogNear: 160, fogFar: 1400,
+    env: 0.85, ground: [1.0, 1.0, 1.0], shadow: 0.42, night: 0, stars: 0, roomDay: 0.35, roadRough: 0.92,
+    exposure: 1.0, balance: [1.01, 1.0, 0.99], contrast: 1.1, saturation: 1.06, bloom: 0.18, threshold: 1.2 },
+  { id: 'twilight', name: 'Blue hour', icon: 'dusk',
+    sunDir: [-0.82, 0.16, -0.4], sunColor: '#ff9a6e', sunI: 1.3, hemiSky: '#5a78b4', hemiGround: '#6a5250', hemiI: 1.5,
+    zenith: '#13254d', horizon: '#c07670', haze: '#8a6f86', glow: '#ff8a5a', fog: '#3f4766', fogNear: 90, fogFar: 1100,
+    env: 0.6, ground: [0.5, 0.5, 0.62], shadow: 0.25, night: 0.7, stars: 0.25, roomDay: 0.1, roadRough: 0.55,
+    exposure: 1.05, balance: [1.02, 0.995, 1.02], contrast: 1.1, saturation: 1.08, bloom: 0.42, threshold: 0.75 },
+  { id: 'night', name: 'Night', icon: 'moon',
+    sunDir: [0.4, 0.62, -0.62], sunColor: '#8cb0e8', sunI: 0.55, hemiSky: '#29406c', hemiGround: '#352c34', hemiI: 1.3,
+    zenith: '#050b18', horizon: '#18253e', haze: '#1e2a40', glow: '#304a74', fog: '#121a2a', fogNear: 70, fogFar: 1000,
+    env: 0.35, ground: [0.24, 0.26, 0.34], shadow: 0.2, night: 1, stars: 1, roomDay: 0.04, roadRough: 0.5,
+    exposure: 1.1, balance: [0.985, 1.0, 1.04], contrast: 1.08, saturation: 1.05, bloom: 0.55, threshold: 0.6 },
+];
+let timeIdx = clamp(TIMES.findIndex(t => t.id === store.get('time', 'golden')), 0, TIMES.length - 1);
+// Shared by every material that needs them: where the sun is, how dark it is, and how the unlit map is lit.
+const sunDirU = { value: new THREE.Vector3(...TIMES[timeIdx].sunDir).normalize() };
+const nightU = { value: 0 };
+const groundTintU = { value: new THREE.Vector3(1, 1, 1) };
+const SUN_OFFSET = new THREE.Vector3();
+
 /* --------------------------------- Sky --------------------------------- */
 const skyMat = new THREE.ShaderMaterial({
   side: THREE.BackSide, depthWrite: false, fog: false,
   uniforms: {
-    zenith: { value: new THREE.Color('#2a6fc4') },
-    horizon: { value: new THREE.Color('#b6d6eb') },
-    haze: { value: new THREE.Color('#d9e9f2') },
+    zenith: { value: new THREE.Color() }, horizon: { value: new THREE.Color() }, haze: { value: new THREE.Color() },
+    glow: { value: new THREE.Color() }, sunDir: sunDirU, sunCol: { value: new THREE.Color() }, stars: { value: 0 }, sunDisc: { value: 1 },
   },
   vertexShader: `
     varying vec3 vDir;
     void main() { vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
   fragmentShader: `
-    uniform vec3 zenith; uniform vec3 horizon; uniform vec3 haze; varying vec3 vDir;
+    uniform vec3 zenith; uniform vec3 horizon; uniform vec3 haze; uniform vec3 glow; uniform vec3 sunDir; uniform vec3 sunCol;
+    uniform float stars; uniform float sunDisc; varying vec3 vDir;
+    float hash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
     void main() {
-      float h = vDir.y;
-      vec3 col = mix(horizon, zenith, pow(clamp(h, 0.0, 1.0), 0.62));
-      col = mix(col, haze, pow(clamp(1.0 - abs(h) * 9.0, 0.0, 1.0), 1.6) * 0.6);
-      col = mix(col, haze * 0.94, pow(clamp(-h, 0.0, 1.0), 0.8) * 0.5);
+      vec3 d = normalize(vDir);
+      float h = d.y;
+      vec3 col = mix(horizon, zenith, pow(clamp(h, 0.0, 1.0), 0.55));
+      col = mix(col, haze, pow(clamp(1.0 - abs(h) * 8.0, 0.0, 1.0), 1.6) * 0.65);
+      col = mix(col, haze * 0.9, pow(clamp(-h, 0.0, 1.0), 0.8) * 0.5);
+      // Toward the sun the haze lights up (a broad Mie lobe and a tight one), brightest near the horizon.
+      float mu = max(dot(d, normalize(sunDir)), 0.0);
+      float low = 1.0 - clamp(h * 2.5, 0.0, 1.0);
+      col += glow * (pow(mu, 6.0) * 0.55 * (0.4 + 0.6 * low) + pow(mu, 48.0) * 0.8);
+      col += sunCol * smoothstep(0.99955, 0.9998, mu) * 24.0 * sunDisc;
+      // Stars: a cell grid on the sky dome, twinkle-free, fading into the city glow at the horizon.
+      if (stars > 0.0) {
+        vec3 c = floor(d * 260.0);
+        float s = hash(c);
+        float star = step(0.9965, s) * smoothstep(0.08, 0.35, h) * (0.4 + 0.6 * hash(c + 7.0));
+        col += vec3(0.9, 0.95, 1.0) * star * stars * 1.6;
+      }
       gl_FragColor = vec4(col, 1.0);
     }`,
 });
-const sky = new THREE.Mesh(new THREE.SphereGeometry(1200, 32, 20), skyMat);
+const sky = new THREE.Mesh(new THREE.SphereGeometry(1200, 48, 24), skyMat);
 sky.frustumCulled = false;
 sky.renderOrder = -2;
 scene.add(sky);
 
-{
-  // Pre-filter the sky into an environment map so the car paint reflects sky above and ground below.
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  const envScene = new THREE.Scene();
-  envScene.add(new THREE.Mesh(new THREE.SphereGeometry(50, 32, 16), skyMat));
-  envScene.add(new THREE.Mesh(
-    new THREE.SphereGeometry(49, 16, 8, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2),
-    new THREE.MeshBasicMaterial({ color: '#98a382', side: THREE.BackSide })
-  ));
-  scene.environment = pmrem.fromScene(envScene, 0, 1, 100).texture;
-  scene.environmentIntensity = 0.9;
-  pmrem.dispose();
-}
+// The sky pre-filtered into an environment map, so paint and glass reflect sky above and ground below.
+const pmrem = new THREE.PMREMGenerator(renderer);
+const envGround = new THREE.MeshBasicMaterial({ color: '#98a382', side: THREE.BackSide });
+const envScene = new THREE.Scene();
+envScene.add(new THREE.Mesh(new THREE.SphereGeometry(50, 32, 16), skyMat));
+envScene.add(new THREE.Mesh(new THREE.SphereGeometry(49, 16, 8, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2), envGround));
+let envRT = null;
 
 const hemi = new THREE.HemisphereLight('#dceeff', '#a8a88c', 0.75);
 scene.add(hemi);
-const SUN_OFFSET = new THREE.Vector3(55, 110, 75);
 const sun = new THREE.DirectionalLight('#fff4de', 2.4);
 sun.castShadow = true;
 const SHADOW_R = LOW_POWER ? 28 : 45;
@@ -401,9 +461,98 @@ Object.assign(sun.shadow.camera, { left: -SHADOW_R, right: SHADOW_R, top: SHADOW
 sun.shadow.bias = -0.0006;
 sun.shadow.normalBias = 0.04;
 scene.add(sun, sun.target);
-const rim = new THREE.DirectionalLight('#ffd9a0', 0.4);
-rim.position.set(-80, 40, -60);
-scene.add(rim);
+
+/** Set every light, the sky, the haze and the grade to one of the looks. */
+function applyTime(i) {
+  timeIdx = i;
+  const T = TIMES[i];
+  sunDirU.value.set(...T.sunDir).normalize();
+  SUN_OFFSET.copy(sunDirU.value).multiplyScalar(170);
+  sun.color.set(T.sunColor); sun.intensity = T.sunI;
+  hemi.color.set(T.hemiSky); hemi.groundColor.set(T.hemiGround); hemi.intensity = T.hemiI;
+  const U = skyMat.uniforms;
+  U.zenith.value.set(T.zenith); U.horizon.value.set(T.horizon); U.haze.value.set(T.haze); U.glow.value.set(T.glow);
+  U.sunCol.value.set(T.sunColor); U.stars.value = T.stars; U.sunDisc.value = T.night >= 1 ? 0.06 : 1;
+  scene.fog.color.set(T.fog); scene.fog.near = T.fogNear; scene.fog.far = T.fogFar;
+  groundTintU.value.set(...T.ground);
+  envGround.color.set(T.hemiGround).multiplyScalar(0.8);
+  nightU.value = T.night;
+  roomDayU.value = T.roomDay;
+  // After dark the streets have a damp sheen that catches the lamps and the headlights.
+  roadMat.roughness = T.roadRough;
+  shadowCatcher.material.opacity = T.shadow;
+  // The sun's disc stays out of the reflections: the lights already make its highlight, and a disc 24 times
+  // brighter than the sky would glare off every roof once blurred into the environment map.
+  const disc = U.sunDisc.value;
+  U.sunDisc.value = 0;
+  if (envRT) envRT.dispose();
+  envRT = pmrem.fromScene(envScene, 0, 1, 100);
+  U.sunDisc.value = disc;
+  scene.environment = envRT.texture;
+  scene.environmentIntensity = T.env;
+  grade.apply(T);
+  for (const f of onTime) f(T);
+  store.set('time', T.id);
+}
+const onTime = [];
+
+/* ---------------------------- Post-processing ---------------------------
+   As in Slop New York: the scene is drawn in linear HDR, exposed and white-
+   balanced, lens bloom added from what's brighter than white (lamps, lit
+   windows, the low sun), then graded (cool shadows, warm highlights,
+   contrast round middle grey, saturation, a faint vignette) and only then
+   tone-mapped (ACES) and converted to sRGB, once.                         */
+const composer = (() => {
+  const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: LOW_POWER ? 0 : 4 });
+  const c = new EffectComposer(renderer, rt);
+  c.addPass(new RenderPass(scene, camera));
+  return c;
+})();
+const exposePass = new ShaderPass({
+  uniforms: { tDiffuse: { value: null }, exposure: { value: 1 }, balance: { value: new THREE.Vector3(1, 1, 1) } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float exposure; uniform vec3 balance; varying vec2 vUv;
+    void main() { gl_FragColor = vec4(max(texture2D(tDiffuse, vUv).rgb, 0.0) * exposure * balance, 1.0); }`,
+});
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.25, 0.45, 1.0);
+const gradePass = new ShaderPass({
+  uniforms: { tDiffuse: { value: null }, contrast: { value: 1 }, saturation: { value: 1 }, aspect: { value: 1 } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float contrast; uniform float saturation; uniform float aspect; varying vec2 vUv;
+    void main() {
+      vec3 color = texture2D(tDiffuse, vUv).rgb;
+      float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+      // Cool shadows, warm highlights: multiplied, so black stays black.
+      color *= mix(vec3(0.965, 1.005, 1.045), vec3(1.0), smoothstep(0.02, 0.6, luma));
+      color *= mix(vec3(1.0), vec3(1.035, 1.005, 0.965), smoothstep(0.6, 3.0, luma));
+      // Contrast round middle grey, scaling the channels together.
+      color *= pow(max(luma, 0.0001) / 0.18, contrast - 1.0);
+      float gray = dot(color, vec3(0.2126, 0.7152, 0.0722));
+      float hi = max(max(color.r, color.g), color.b), lo = min(min(color.r, color.g), color.b);
+      float vibrance = 0.1 * (1.0 - (hi - lo) / max(hi, 0.0001));
+      color = max(mix(vec3(gray), color, saturation + vibrance), 0.0);
+      vec2 q = (vUv - 0.5) * vec2(aspect, 1.0);
+      float radius = length(q) / length(vec2(aspect, 1.0) * 0.5);
+      color *= 1.0 - smoothstep(0.35, 1.0, radius) * 0.12;
+      gl_FragColor = vec4(color, 1.0);
+    }`,
+});
+composer.addPass(exposePass);
+composer.addPass(bloomPass);
+composer.addPass(gradePass);
+composer.addPass(new OutputPass());
+const grade = {
+  apply(T) {
+    exposePass.uniforms.exposure.value = T.exposure;
+    exposePass.uniforms.balance.value.set(...T.balance);
+    gradePass.uniforms.contrast.value = T.contrast;
+    gradePass.uniforms.saturation.value = T.saturation;
+    bloomPass.strength = T.bloom;
+    bloomPass.threshold = T.threshold;
+  },
+};
 
 /* ---------------------------- Lie of the land ----------------------------
    The ground's real height from the 2022 LiDAR survey (city/ground.bin, made by
@@ -463,18 +612,19 @@ const grain = (() => {
 const mapBounds = new THREE.Vector4(MAP.x0, MAP.x1, MAP.z0, MAP.z1);
 const noBounds = new THREE.Vector4(-1e6, 1e6, -1e6, 1e6);
 function groundMaterial(bounds, detail = 0) {
-  const mat = new THREE.MeshBasicMaterial({ color: '#a9d17c', toneMapped: false });
+  const mat = new THREE.MeshBasicMaterial({ color: '#a9d17c' });
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.grainMap = { value: grain };
     sh.uniforms.mapBounds = { value: bounds };
     sh.uniforms.facadeColor = facadeU.color;
     sh.uniforms.detailOn = { value: detail };
-    sh.uniforms.sunDir = { value: SUN_OFFSET.clone().normalize() };
+    sh.uniforms.sunDir = sunDirU;
+    sh.uniforms.groundTint = groundTintU;
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec2 vGroundXZ;\nvarying vec3 vGroundN;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvGroundXZ = (modelMatrix * vec4(position, 1.0)).xz;\nvGroundN = normalize(mat3(modelMatrix) * normal);');
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform sampler2D grainMap;\nuniform vec4 mapBounds;\nuniform highp sampler2DArray facadeColor;\nuniform float detailOn;\nuniform vec3 sunDir;\nvarying vec2 vGroundXZ;\nvarying vec3 vGroundN;')
+      .replace('#include <common>', '#include <common>\nuniform sampler2D grainMap;\nuniform vec4 mapBounds;\nuniform highp sampler2DArray facadeColor;\nuniform float detailOn;\nuniform vec3 sunDir;\nuniform vec3 groundTint;\nvarying vec2 vGroundXZ;\nvarying vec3 vGroundN;')
       .replace('#include <map_fragment>', `#include <map_fragment>
         float fine = texture2D(grainMap, vGroundXZ * 0.35).r;
         float broad = texture2D(grainMap, vGroundXZ * 0.021).r;
@@ -494,7 +644,7 @@ function groundMaterial(bounds, detail = 0) {
         }
         // The map is unlit, so shade the slopes by hand: brighter facing the sun, darker turned away.
         float slopeLight = dot(normalize(vGroundN), sunDir) / sunDir.y;
-        diffuseColor.rgb *= clamp(mix(1.0, slopeLight, 0.85), 0.5, 1.3);
+        diffuseColor.rgb *= clamp(mix(1.0, slopeLight, 0.85), 0.5, 1.3) * groundTint;
         float edge = min(min(vGroundXZ.x - mapBounds.x, mapBounds.y - vGroundXZ.x), min(vGroundXZ.y - mapBounds.z, mapBounds.w - vGroundXZ.y));
         diffuseColor.a *= smoothstep(0.0, 160.0, edge);`);
   };
@@ -737,11 +887,13 @@ whitePixel.needsUpdate = true;
 function cityShader(sh) {
   sh.uniforms.facadeColor = facadeU.color;
   sh.uniforms.facadeNormal = facadeU.normal;
+  sh.uniforms.night = nightU;
+  sh.uniforms.roomDay = roomDayU;
   sh.vertexShader = sh.vertexShader
     .replace('#include <common>', '#include <common>\nattribute vec2 la;\nflat varying float vLayer;\nvarying float vAo;')
     .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLayer = la.x;\nvAo = la.y / 255.0;');
   sh.fragmentShader = sh.fragmentShader
-    .replace('#include <common>', '#include <common>\nuniform highp sampler2DArray facadeColor;\nuniform highp sampler2DArray facadeNormal;\nflat varying float vLayer;\nvarying float vAo;')
+    .replace('#include <common>', '#include <common>\nuniform highp sampler2DArray facadeColor;\nuniform highp sampler2DArray facadeNormal;\nflat varying float vLayer;\nvarying float vAo;\n' + ROOM_GLSL)
     .replace('#include <map_fragment>', `
       vec4 facadeTex = texture(facadeColor, vec3(vMapUv, vLayer));
       vec4 facadeNrm = texture(facadeNormal, vec3(vMapUv, vLayer));
@@ -749,11 +901,55 @@ function cityShader(sh) {
       float glassMask = smoothstep(0.7, 0.9, facadeNrm.b);
       diffuseColor.rgb *= facadeTex.rgb;`)
     .replace('#include <color_fragment>', 'diffuseColor.rgb *= mix(vColor.rgb, vec3(1.0), trimMask) * vAo;')
-    .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = mix(roughness, 0.06, glassMask);')
+    .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = mix(roughness, 0.06, glassMask);\ndiffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * 0.3, glassMask * step(vLayer, 5.5));')
+    .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += glassMask * step(vLayer, 5.5) * roomLight(vMapUv, vColor.rgb + vLayer * 0.137, vLayer > 3.5 && vLayer < 4.5);')
     .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = mix(metalness, 0.35, glassMask);')
     .replace('vec3 mapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;',
       'vec3 mapN = vec3(facadeNrm.rg * 2.0 - 1.0, 0.0);\n\tmapN.z = sqrt(saturate(1.0 - dot(mapN.xy, mapN.xy)));');
 }
+// Rooms behind the windows (after Slop New York's ray-marched apartment interiors): each window cell looks into a box
+// room, its back wall, side walls, floor and ceiling found by intersecting the view ray with the room's planes in the
+// wall's own frame. By day the rooms are dim; after dark a share of them light up warm (a few cool), more in the
+// shops on the ground floor.
+const roomDayU = { value: 0.3 };
+const ROOM_GLSL = `
+uniform float night;
+uniform float roomDay;
+float roomHash(vec3 p) { p = fract(p * vec3(0.1031, 0.1030, 0.0973)); p += dot(p, p.yxz + 33.33); return fract((p.x + p.y) * p.z); }
+vec3 roomLight(vec2 uv, vec3 seed, bool shop) {
+  vec3 pos = -vViewPosition;
+  vec3 n = normalize(cross(dFdx(pos), dFdy(pos)));
+  vec3 dp1 = dFdx(pos), dp2 = dFdy(pos);
+  vec2 du1 = dFdx(uv), du2 = dFdy(uv);
+  vec3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
+  vec3 T = dp2perp * du1.x + dp1perp * du2.x, B = dp2perp * du1.y + dp1perp * du2.y;
+  float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+  T *= invmax; B *= invmax;
+  // The view ray in the wall's frame (u along, v up, w out of the wall), scaled to cells (one per bay and floor).
+  vec3 V = normalize(vViewPosition);
+  vec3 dir = -vec3(dot(V, T) / max(length(T), 1e-4), dot(V, B) / max(length(B), 1e-4), dot(V, n));
+  dir.z = min(dir.z, -0.05);
+  vec2 cell = floor(uv), f = fract(uv);
+  float depth = 0.9;
+  vec3 o = vec3(f, 0.0);
+  vec3 tx = (step(0.0, dir) - o) / dir;          // distance to the far plane on each axis
+  tx.z = -depth / dir.z;
+  float t = min(min(tx.x, tx.y), tx.z);
+  vec3 hit = o + dir * t;
+  float h = roomHash(vec3(cell, 0.0) + seed * 97.0);
+  float h2 = roomHash(vec3(cell, 5.0) + seed * 53.0);
+  vec3 wall = mix(vec3(0.78, 0.72, 0.62), vec3(0.62, 0.68, 0.72), step(0.6, h2));
+  vec3 col;
+  if (t == tx.z) col = wall * (0.75 + 0.25 * step(0.35, fract(hit.x * 3.0 + h2)) * step(hit.y, 0.55));   // back wall, a picture or a shelf
+  else if (t == tx.y) col = dir.y < 0.0 ? vec3(0.35, 0.26, 0.18) * (0.8 + 0.2 * h) : vec3(0.92);           // floor or ceiling
+  else col = wall * 0.82;                                                                                 // side walls
+  float back = clamp(-hit.z / depth, 0.0, 1.0);
+  col *= 1.0 - back * 0.35;
+  float lit = step(h, mix(0.0, shop ? 0.85 : 0.42, night));
+  vec3 lamp = mix(vec3(1.0, 0.7, 0.42), vec3(0.72, 0.84, 1.0), step(0.86, h2));
+  float pool = 1.0 - 0.4 * length(hit.xy - vec2(0.5, 0.9));                  // the ceiling light's falloff
+  return col * (roomDay * (0.55 + 0.45 * (1.0 - back)) + lit * lamp * pool * (shop ? 2.6 : 1.8));
+}`;
 function makeCityMat(extra = {}) {
   const mat = new THREE.MeshStandardMaterial({
     vertexColors: true, roughness: 0.92, metalness: 0, flatShading: true, side: THREE.DoubleSide,
@@ -1110,7 +1306,8 @@ function fenceGeo(G, f, seed) {
    has in Minneapolis, round intersections and crosswalks at the busy ones. */
 const ROAD_KINDS = ['pedestrian', 'living_street', 'residential', 'unclassified', 'tertiary_link', 'secondary_link',
   'primary_link', 'trunk_link', 'motorway_link', 'tertiary', 'secondary', 'primary', 'trunk', 'motorway', 'path'];
-const ASPHALT = { local: new THREE.Color('#b4b7b9'), major: new THREE.Color('#a3a7ab'), freeway: new THREE.Color('#adb0b3') };
+// Darker, as in Slop New York: worn grey asphalt that the paint and the curbs stand out against.
+const ASPHALT = { local: new THREE.Color('#8d9194'), major: new THREE.Color('#7d8286'), freeway: new THREE.Color('#878b8e') };
 const CURB = new THREE.Color('#d9d6cf'), WALK = new THREE.Color('#eceae4');
 const PAINT_WHITE = new THREE.Color('#f4f4f0'), PAINT_YELLOW = new THREE.Color('#f0c23a');
 // (Draped over the ground, whose triangles they don't share, so they ride a few centimetres up.)
@@ -1265,22 +1462,10 @@ function crosswalkGeo(M, x, z, ang, w) {
   }
 }
 
-// Trees from the LiDAR survey: a trunk and a lumpy crown, sized to each one's measured height and spread.
-const crownGeo = (() => {
-  const parts = [[0, 0, 0, 1], [0.45, 0.2, 0.15, 0.7], [-0.4, 0.1, -0.3, 0.72], [0.1, 0.35, -0.45, 0.66], [-0.15, -0.2, 0.45, 0.68]]
-    .slice(0, LOW_POWER ? 3 : 5)
-    .map(([x, y, z, r]) => new THREE.IcosahedronGeometry(r, 0).translate(x, y, z));   // 20 faces a lump: thousands are in view at once
-  const pos = [];
-  for (const g of parts) pos.push(...g.toNonIndexed().getAttribute('position').array);
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.computeVertexNormals();
-  return g.scale(0.82, 0.82, 0.82);
-})();
-const crownMat = new THREE.MeshStandardMaterial({ flatShading: true, roughness: 0.95 });
-const trunkGeo = new THREE.CylinderGeometry(0.6, 1, 1, 7).translate(0, 0.5, 0);
-const trunkMat = new THREE.MeshStandardMaterial({ color: '#6b5440', roughness: 1 });
-const greens = ['#4f8a3c', '#5b9643', '#467f37', '#6a9f4a', '#3f7535', '#77a852', '#55803f'].map(g => new THREE.Color(g));
+// Trees from the LiDAR survey, grown as Slop New York's procedural elms, locusts and planes (nyc/trees.js),
+// each fitted to its measured height and spread, swaying in the wind.
+const trees = createTreeField({ lowPower: LOW_POWER, castShadow: !LOW_POWER });
+scene.add(trees.group);
 
 // Street signs: green blades with the two street names, on a post at one corner.
 const SIGN_ABBR = [[/\bAvenue\b/g, 'Av'], [/\bStreet\b/g, 'St'], [/\bBoulevard\b/g, 'Blvd'], [/\bParkway\b/g, 'Pkwy'],
@@ -1448,30 +1633,12 @@ function buildDetail(T) {
     g.computeVertexNormals();
     out.push(new THREE.Mesh(g, ch.signMat));
   }
-  if (T.t.length) {
-    const crowns = new THREE.InstancedMesh(crownGeo, crownMat, T.t.length);
-    const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, T.t.length);
-    const mtx = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), sc = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
-    T.t.forEach(([x10, z10, h10, r10], n) => {
-      const x = x10 / 10, z = z10 / 10, H = h10 / 10, r = r10 / 10;
-      const seed = Math.abs(x10 * 7 + z10 * 13), gy = groundH(x, z);
-      const cv = Math.min(r * 1.05, H * 0.42);                 // the crown's half-height
-      q.setFromAxisAngle(up, (seed % 628) / 100);
-      mtx.compose(v.set(x, gy + H - cv, z), q, sc.set(r, cv, r * (0.9 + (seed % 20) / 100)));
-      crowns.setMatrixAt(n, mtx);
-      crowns.setColorAt(n, greens[seed % greens.length]);
-      mtx.compose(v.set(x, gy - 0.4, z), q, sc.set(0.14 + H * 0.012, H - cv * 1.2 + 0.4, 0.14 + H * 0.012));
-      trunks.setMatrixAt(n, mtx);
-    });
-    crowns.computeBoundingSphere(); trunks.computeBoundingSphere();
-    crowns.castShadow = trunks.castShadow = !LOW_POWER;
-    crowns.receiveShadow = !LOW_POWER;
-    out.push(crowns, trunks);
-  }
+  trees.add(T, T.t.map(([x10, z10, h10, r10]) => ({ x: x10 / 10, z: z10 / 10, y: groundH(x10 / 10, z10 / 10), h: h10 / 10, r: r10 / 10 })));
   for (const o of out) scene.add(o);
   T.built = out;
 }
 function dropDetail(T) {
+  trees.remove(T);
   for (const m of T.built) {
     scene.remove(m);
     if (m.isInstancedMesh) m.dispose();               // the instance buffers; the shapes are shared
@@ -1767,109 +1934,31 @@ function updatePlacesCount() {
 updatePlacesCount();
 
 /* -------------------------------- The car -------------------------------- */
-// A chunky toy hatchback facing +z. The body is a side profile extruded
-// across its width with rounded edges; front wheels steer, all four roll.
+// Slop New York's lofted sedan (nyc/cars.js), facing +z, in the paint you pick: glass, lamps, grille, shut lines
+// and alloys are painted on by its material. The body rolls and pitches; front wheels steer, all four roll.
 const PAINTS = ['#e4574b', '#f2b541', '#3f7fd0', '#3fa35b', '#f4f1ea', '#8a5cc9', '#2f3b4c', '#f08a3c'];
 let paintIdx = clamp(store.get('paint', 0), 0, PAINTS.length - 1);
-const paint = new THREE.MeshPhysicalMaterial({
-  color: PAINTS[paintIdx], metalness: 0.2, roughness: 0.38, clearcoat: 1, clearcoatRoughness: 0.12,
-});
-const glass = new THREE.MeshPhysicalMaterial({ color: '#1d2b3a', metalness: 0.1, roughness: 0.08, envMapIntensity: 1.6 });
-const trimMat = new THREE.MeshStandardMaterial({ color: '#2b2f35', roughness: 0.7 });
-const chrome = new THREE.MeshStandardMaterial({ color: '#dfe4ea', metalness: 1, roughness: 0.25 });
-const tyreMat = new THREE.MeshStandardMaterial({ color: '#1e2126', roughness: 0.85 });
-const headMat = new THREE.MeshStandardMaterial({ color: '#fffbe8', emissive: '#fff3c4', emissiveIntensity: 0.6 });
-const tailMat = new THREE.MeshStandardMaterial({ color: '#c0262b', emissive: '#ff2a2a', emissiveIntensity: 0.25 });
-
-function sideExtrude(points, width, bevel, mat) {
-  const shape = new THREE.Shape(points.map(([z, y]) => new THREE.Vector2(z, y)));
-  const depth = width - bevel * 2;
-  const g = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: true, bevelSize: bevel, bevelThickness: bevel, bevelSegments: 3, curveSegments: 6 });
-  g.rotateY(-Math.PI / 2);
-  g.translate(depth / 2, 0, 0);
-  const m = new THREE.Mesh(g, mat);
-  m.castShadow = true;
-  return m;
-}
+const PLAYER_SPEC = BODY_SPECS.sedan;
+const carMat = createCarMaterial(PLAYER_SPEC, { night: nightU });
+const paint = { color: carMat.userData.paint.set(PAINTS[paintIdx]) };
 
 const car = new THREE.Group();
 const carBody = new THREE.Group();           // rolls and pitches; the wheels stay planted
 car.add(carBody);
-carBody.add(sideExtrude([[-2.0, 0.34], [1.98, 0.34], [2.1, 0.5], [2.08, 0.7], [1.82, 0.88], [0.78, 0.98], [-1.62, 1.02], [-2.0, 0.94], [-2.08, 0.66]], 1.82, 0.1, paint));
-carBody.add(sideExtrude([[0.86, 0.95], [0.12, 1.5], [-1.2, 1.52], [-1.72, 1.0]], 1.6, 0.06, glass));
 {
-  const roof = sideExtrude([[0.14, 1.5], [-1.2, 1.52], [-1.24, 1.6], [0.1, 1.58]], 1.6, 0.06, paint);
-  carBody.add(roof);
-  const pillar = new THREE.Mesh(new THREE.BoxGeometry(1.66, 0.52, 0.12), paint);
-  pillar.position.set(0, 1.24, -0.42);
-  carBody.add(pillar);
-  for (const [z, w] of [[2.12, 1.86], [-2.1, 1.86]]) {
-    const bumper = new THREE.Mesh(new THREE.BoxGeometry(w, 0.2, 0.22), trimMat);
-    bumper.position.set(0, 0.4, z);
-    carBody.add(bumper);
-  }
-  const grille = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.14, 0.06), trimMat);
-  grille.position.set(0, 0.62, 2.16);
-  carBody.add(grille);
-  for (const s of [-1, 1]) {
-    const hl = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.16, 0.08), headMat);
-    hl.position.set(s * 0.62, 0.66, 2.13);
-    const tl = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.14, 0.08), tailMat);
-    tl.position.set(s * 0.64, 0.8, -2.12);
-    const mirror = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.12, 0.1), paint);
-    mirror.position.set(s * 0.98, 1.08, 0.68);
-    const handle = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.04, 0.18), chrome);
-    handle.position.set(s * 0.97, 0.86, -0.2);
-    carBody.add(hl, tl, mirror, handle);
-  }
+  const body = new THREE.Mesh(buildCarGeometry(PLAYER_SPEC, false), carMat);
+  body.castShadow = true;
+  carBody.add(body);
 }
-{
-  // Under the body: a dark floor pan and sills, so there's no daylight between the car and the road,
-  // plates front and back, an exhaust, and black arches round the wheels.
-  const floor = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.16, 3.7), trimMat);
-  floor.position.set(0, 0.3, 0);
-  carBody.add(floor);
-  for (const s of [-1, 1]) {
-    const sill = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.14, 1.5), trimMat);
-    sill.position.set(s * 0.9, 0.38, 0);
-    carBody.add(sill);
-    for (const z of [1.3, -1.3]) {
-      const arch = new THREE.Mesh(new THREE.TorusGeometry(0.47, 0.065, 6, 14, Math.PI), trimMat);
-      arch.rotation.y = Math.PI / 2;
-      arch.position.set(s * 0.92, 0.38, z);
-      carBody.add(arch);
-    }
-  }
-  const plateMat = new THREE.MeshStandardMaterial({ color: '#f1f3f5', roughness: 0.5 });
-  for (const z of [2.23, -2.22]) {
-    const plate = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.13, 0.02), plateMat);
-    plate.position.set(0, z > 0 ? 0.42 : 0.6, z);
-    carBody.add(plate);
-  }
-  const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.2, 8).rotateX(Math.PI / 2), chrome);
-  pipe.position.set(0.55, 0.27, -2.12);
-  carBody.add(pipe);
-}
-const WHEEL_R = 0.38, WHEELBASE = 2.6;
-// Tyres with rounded shoulders (turned from a profile), set out so they fill the arches.
-const wheelGeo = new THREE.LatheGeometry([[0.2, -0.15], [0.33, -0.16], [0.37, -0.13], [WHEEL_R, -0.08], [WHEEL_R, 0.08],
-  [0.37, 0.13], [0.33, 0.16], [0.2, 0.15]].map(([r, y]) => new THREE.Vector2(r, y)), 22).rotateZ(Math.PI / 2);
-const rimGeo = new THREE.CylinderGeometry(0.23, 0.23, 0.31, 14).rotateZ(Math.PI / 2);
+const WHEEL_R = PLAYER_SPEC.wheelRadius, WHEELBASE = 2.6;
 const wheels = [];
-for (const [x, z] of [[0.86, 1.3], [-0.86, 1.3], [0.86, -1.3], [-0.86, -1.3]]) {
+for (const side of [1, -1]) for (const z of [PLAYER_SPEC.wheelZ, -PLAYER_SPEC.wheelZ]) {
   const pivot = new THREE.Group();
-  pivot.position.set(x, WHEEL_R, z);
+  pivot.position.set(side * PLAYER_SPEC.wheelX, WHEEL_R, z);
   const spin = new THREE.Group();
-  const tyre = new THREE.Mesh(wheelGeo, tyreMat);
-  tyre.castShadow = true;
-  const rim = new THREE.Mesh(rimGeo, chrome);
-  spin.add(tyre, rim);
-  for (let k = 0; k < 5; k++) {                                   // five spokes, so the roll reads
-    const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.36, 0.07), trimMat);
-    spoke.position.x = Math.sign(x) * 0.16;
-    spoke.rotation.x = k / 5 * Math.PI;
-    spin.add(spoke);
-  }
+  const wheel = new THREE.Mesh(buildSteerableWheelGeo(PLAYER_SPEC, side), carMat);
+  wheel.castShadow = true;
+  spin.add(wheel);
   pivot.add(spin);
   car.add(pivot);
   wheels.push({ pivot, spin, front: z > 0 });
@@ -1983,11 +2072,111 @@ function stepPuffs(dt) {
   puffGeo.attributes.color.needsUpdate = true;
 }
 
+/* --------------------------------- People --------------------------------- */
+// Slop New York's skinned walkers (nyc/people.js) out on the sidewalks near you, most of them on the main streets:
+// each plants its footsteps on the ground, so feet never slide, and turns back or heads off at the end of the block.
+const PEOPLE_N = LOW_POWER ? 24 : 72;
+const PEOPLE_R = 170;                          // people live on sidewalks this close to you
+const crowd = new PersonCrowd(PEOPLE_N, { castShadow: !LOW_POWER });
+scene.add(...crowd.meshes);
+const people = [];
+for (let i = 0; i < PEOPLE_N; i++) {
+  const h = (k) => { const v = Math.sin((i + 1) * 12.9898 + k * 78.233) * 43758.5453; return v - Math.floor(v); };
+  const female = h(1) < 0.5, hairRoll = h(3);
+  people.push({
+    path: null, s: 0, dir: 1, speed: 1.15 + h(2) * 0.5, x: 0, z: 0, heading: 0, wait: h(8) * 2,
+    rig: new PersonRig({
+      seed: i * 1.6180339 + 0.13, female, scale: (female ? 0.91 : 0.97) + h(4) * 0.1, girth: 0.9 + h(5) * 0.24,
+      hair: female ? (hairRoll < 0.68 ? 1 : 0.3 + hairRoll * 0.25) : hairRoll < 0.08 ? 1 : hairRoll * 0.35,
+      armSwing: 0.75 + h(6) * 0.5, stride: 0.94 + h(7) * 0.12,
+    }),
+  });
+}
+let walkRoads = [], walkRoadsAt = null;
+/** The sidewalks of the streets built near you: [polyline, distance to the walk's middle, start, end]. */
+function refreshWalkRoads() {
+  if (walkRoadsAt && Math.hypot(walkRoadsAt.x - player.x, walkRoadsAt.z - player.z) < 40) return;
+  walkRoadsAt = { x: player.x, z: player.z };
+  walkRoads = [];
+  for (const ch of readyChunks) for (const T of ch.pieces) {
+    if (!T.built || Math.hypot(T.cx - player.x, T.cz - player.z) > PEOPLE_R + 360) continue;
+    for (const r of T.rd) {
+      const [cls, w10, , , t010, t110, n] = r;
+      const kind = ROAD_KINDS[cls];
+      if (kind === 'path' || /^(motorway|trunk)/.test(kind)) continue;
+      const pts = [];
+      for (let i = 0; i < n; i++) pts.push([r[7 + i * 2] / 10, r[8 + i * 2] / 10]);
+      if (!pts.some(([x, z]) => Math.hypot(x - player.x, z - player.z) < PEOPLE_R)) continue;
+      const cum = arcLengths(pts), L = cum[cum.length - 1], s0 = t010 / 10, s1 = L - t110 / 10;
+      if (s1 - s0 < 12) continue;
+      const hw = w10 / 20, main = kind === 'primary' || kind === 'secondary';
+      // Downtown-style main streets: a wide walk to the curb, and four times the people.
+      const d = main ? hw + 1.65 : hw + 3.15;
+      const road = { pts, cum, s0, s1, d };
+      for (let k = main ? 4 : 1; k > 0; k--) walkRoads.push(road);
+    }
+  }
+}
+function placePerson(p, near) {
+  refreshWalkRoads();
+  for (let tries = 0; tries < 12 && walkRoads.length; tries++) {
+    const road = walkRoads[Math.floor(Math.random() * walkRoads.length)];
+    const s = road.s0 + Math.random() * (road.s1 - road.s0);
+    const at = walkAt(road, s, Math.random() < 0.5 ? 1 : -1);
+    const d = Math.hypot(at.x - player.x, at.z - player.z);
+    if (d < PEOPLE_R && (near || d > 60)) {
+      Object.assign(p, { path: road, s, side: at.side, dir: Math.random() < 0.5 ? 1 : -1 });
+      return;
+    }
+  }
+  p.path = null;
+  p.wait = 1;
+}
+const _walk = { x: 0, z: 0, ux: 0, uz: 1, side: 1 };
+function walkAt(road, s, side) {
+  const { pts, cum } = road;
+  let i = 1;
+  while (i < pts.length - 1 && cum[i] < s) i++;
+  const L = cum[i] - cum[i - 1] || 1, u = (s - cum[i - 1]) / L;
+  const ux = (pts[i][0] - pts[i - 1][0]) / L, uz = (pts[i][1] - pts[i - 1][1]) / L;
+  _walk.x = pts[i - 1][0] + ux * L * u - uz * road.d * side;
+  _walk.z = pts[i - 1][1] + uz * L * u + ux * road.d * side;
+  _walk.ux = ux; _walk.uz = uz; _walk.side = side;
+  return _walk;
+}
+const walkGround = (p, x, z) => groundH(x, z) + WALK_Y;
+let peopleStarted = false;
+function stepPeople(dt) {
+  if (!peopleStarted) { people.forEach(p => placePerson(p, true)); peopleStarted = true; }
+  crowd.begin();
+  const cx = camera.position.x, cz = camera.position.z;
+  for (const p of people) {
+    if (!p.path) { p.wait -= dt; if (p.wait <= 0) placePerson(p, false); continue; }
+    const road = p.path;
+    // Wait for the car if it's on the walk just ahead.
+    const ahead = (player.x - p.x) * Math.sin(p.heading) + (player.z - p.z) * Math.cos(p.heading);
+    const blocked = ahead > 0 && ahead < 4 && Math.hypot(player.x - p.x, player.z - p.z) < 3.5;
+    p.s += (blocked ? 0 : p.speed) * dt * p.dir;
+    if (p.s < road.s0 || p.s > road.s1) {
+      // The end of the block: turn back, or cross over to walk somewhere else.
+      if (Math.random() < 0.5) { p.dir = -p.dir; p.s = clamp(p.s, road.s0, road.s1); } else { placePerson(p, false); continue; }
+    }
+    const at = walkAt(road, p.s, p.side);
+    p.x = at.x; p.z = at.z;
+    p.heading = Math.atan2(at.ux * p.dir, at.uz * p.dir);
+    const d = Math.hypot(p.x - cx, p.z - cz);
+    if (Math.hypot(p.x - player.x, p.z - player.z) > PEOPLE_R + 40) { placePerson(p, false); continue; }
+    p.rig.update(dt, p.x, p.z, p.heading, walkGround, p, 0, d < 140);
+    if (d < 140) crowd.add(p.rig, d);
+  }
+  crowd.end();
+}
+
 /* --------------------------------- Traffic --------------------------------- */
 // Toy cars cruising the main streets on their own side of the road. They
 // stop for you, and when one runs out of road or falls far behind it
 // reappears on a main street somewhere near you.
-let traffic = [], trafficMesh = null;
+let traffic = [];
 const tPos = { x: new Float32Array(0), z: new Float32Array(0), h: new Float32Array(0) };
 const TRAFFIC_R = 900;                         // cars live on the main streets this close to you
 let nearRoutes = [], nearRoutesAt = null;
@@ -2009,38 +2198,58 @@ function trafficSpot(minD) {
   }
   return null;
 }
+// Slop New York's lofted sedans, SUVs and the odd cab, one instanced draw per body and level of detail: the full
+// model up close, a ~250-triangle stand-in further off. Paint and brake lights are per car.
+const TRAFFIC_KINDS = [['sedan', 0.52], ['suv', 0.42], ['taxi', 0.06]];
+const TRAFFIC_NEAR = 110;
+let trafficSets = [];
 function buildTraffic() {
-  // [length, height, width, z offset, bottom, shade]: the shade darkens the instance colour.
-  const parts = [
-    [4.1, 0.75, 1.78, 0, 0.3, 1.0],               // body
-    [3.6, 0.36, 1.62, 0, 0, 0.14],                // wheels and sills
-    [2.1, 0.55, 1.58, -0.25, 1.05, 0.3],          // glasshouse
-    [2.0, 0.1, 1.62, -0.25, 1.58, 1.0],           // roof
-  ];
-  const pos = [], col = [];
-  for (const [len, hgt, wid, oz, bottom, shade] of parts) {
-    const p = new THREE.BoxGeometry(wid, hgt, len).translate(0, bottom + hgt / 2, oz).toNonIndexed().getAttribute('position').array;
-    for (let i = 0; i < p.length; i++) pos.push(p[i]);
-    for (let i = 0; i < p.length / 3; i++) col.push(shade, shade, shade);
-  }
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  geo.computeVertexNormals();
   const count = LOW_POWER ? 70 : 130;
-  trafficMesh = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), count);
-  trafficMesh.castShadow = !LOW_POWER;
-  trafficMesh.frustumCulled = false;
-  const colors = ['#e45b4f', '#f2c14e', '#4f86c6', '#f4f1ea', '#5aa469', '#2f3b4c', '#e98a3c', '#b8c2cc'].map(c => new THREE.Color(c));
+  const colors = ['#e45b4f', '#f2c14e', '#4f86c6', '#f4f1ea', '#5aa469', '#2f3b4c', '#e98a3c', '#b8c2cc', '#1d1f22', '#8c1f24', '#c9ccd0', '#33465e']
+    .map(c => new THREE.Color(c));
+  trafficSets = TRAFFIC_KINDS.map(([kind]) => {
+    const spec = BODY_SPECS[kind];
+    const mat = createCarMaterial(spec, { instanced: true, night: nightU });
+    const lod = [buildCarGeometry(spec, true), buildCarProxyGeometry(spec)].map((geo) => {
+      geo.setAttribute('paintColor', new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3));
+      geo.setAttribute('carState', new THREE.InstancedBufferAttribute(new Float32Array(count * 4), 4));
+      const m = new THREE.InstancedMesh(geo, mat, count);
+      m.count = 0;
+      m.castShadow = !LOW_POWER;
+      m.frustumCulled = false;
+      scene.add(m);
+      return m;
+    });
+    return { kind, lod };
+  });
   tPos.x = new Float32Array(count); tPos.z = new Float32Array(count); tPos.h = new Float32Array(count);
   for (let n = 0; n < count; n++) {
     const base = 9 + Math.random() * 5;
-    const t = { route: null, s: 0, seg: 0, dir: 1, speed: base, base, y: 0, bump: 0, wait: 0 };
+    let r = Math.random(), kind = 0;
+    while (kind < TRAFFIC_KINDS.length - 1 && r > TRAFFIC_KINDS[kind][1]) r -= TRAFFIC_KINDS[kind++][1];
+    const col = TRAFFIC_KINDS[kind][0] === 'taxi' ? new THREE.Color('#f2b51c') : colors[Math.floor(Math.random() * colors.length)];
+    const t = { route: null, s: 0, seg: 0, dir: 1, speed: base, base, y: 0, bump: 0, wait: 0, kind, col, brake: 0, m: new THREE.Matrix4() };
     traffic.push(t);
     respawnTraffic(t, 30);
-    trafficMesh.setColorAt(n, colors[n % colors.length]);
   }
-  scene.add(trafficMesh);
+}
+/** Sort the cars into the instanced meshes of their body and level of detail. */
+function drawTraffic() {
+  for (const set of trafficSets) for (const m of set.lod) m.count = 0;
+  const cx = camera.position.x, cz = camera.position.z;
+  traffic.forEach((t, n) => {
+    if (!t.route) return;
+    const m = trafficSets[t.kind].lod[Math.hypot(tPos.x[n] - cx, tPos.z[n] - cz) < TRAFFIC_NEAR ? 0 : 1];
+    const k = m.count++;
+    m.setMatrixAt(k, t.m);
+    m.geometry.attributes.paintColor.setXYZ(k, t.col.r, t.col.g, t.col.b);
+    m.geometry.attributes.carState.setXYZW(k, t.brake, 0, 0, 0);
+  });
+  for (const set of trafficSets) for (const m of set.lod) {
+    m.instanceMatrix.needsUpdate = true;
+    m.geometry.attributes.paintColor.needsUpdate = true;
+    m.geometry.attributes.carState.needsUpdate = true;
+  }
 }
 function respawnTraffic(t, minD = 260) {
   const spot = trafficSpot(minD);
@@ -2048,12 +2257,10 @@ function respawnTraffic(t, minD = 260) {
   Object.assign(t, spot, { dir: spot.route.oneway || Math.random() < 0.5 ? 1 : -1, speed: t.base, y: NaN, bump: 0 });
 }
 function stepTraffic(dt) {
-  if (!trafficMesh) return;
+  if (!trafficSets.length) return;
   traffic.forEach((t, n) => {
     if (!t.route) {
       tPos.x[n] = tPos.z[n] = 1e9;                 // parked out of sight, and out of the way
-      _m4.makeTranslation(0, -100, 0);
-      trafficMesh.setMatrixAt(n, _m4);
       t.wait -= dt;
       if (t.wait <= 0) respawnTraffic(t);
       return;
@@ -2066,6 +2273,7 @@ function stepTraffic(dt) {
     const dx = player.x - tPos.x[n], dz = player.z - tPos.z[n];
     const ahead = dx * hx + dz * hz, side = Math.abs(-dx * hz + dz * hx);
     if (ahead > 0 && ahead < 16 && side < 2.6) target = Math.min(target, Math.max(0, (ahead - 6) * 1.2));
+    t.brake = target < t.speed - 0.5 ? 1 : 0;
     t.speed += clamp(target - t.speed, -12 * dt, 3 * dt);
     t.s += t.speed * dt * t.dir;
     // Off the end of the street, or left far behind: reappear somewhere near the player.
@@ -2087,10 +2295,9 @@ function stepTraffic(dt) {
     const pitch = Math.atan2(surfaceY(x + hx2 * 1.5, z + hz2 * 1.5, t.y) - surfaceY(x - hx2 * 1.5, z - hz2 * 1.5, t.y), 3);
     tPos.x[n] = x; tPos.z[n] = z; tPos.h[n] = h;
     _q.setFromEuler(_eul.set(-pitch, h, 0, 'YXZ'));
-    _m4.compose(_v.set(x, t.y, z), _q, _s);
-    trafficMesh.setMatrixAt(n, _m4);
+    t.m.compose(_v.set(x, t.y, z), _q, _s);
   });
-  trafficMesh.instanceMatrix.needsUpdate = true;
+  drawTraffic();
 }
 
 /* ------------------------------- Driving ------------------------------- */
@@ -2376,7 +2583,7 @@ function poseCar(dt) {
     w.spin.rotation.x += P.fwd * dt / WHEEL_R;
     if (w.front) w.pivot.rotation.y = -P.steer;
   }
-  tailMat.emissiveIntensity = input.brake > 0 && P.fwd > 0.5 ? 2.2 : input.brake > 0 ? 1.2 : 0.25;
+  carMat.userData.carState.x = input.brake > 0 && Math.abs(P.fwd) > 0.5 ? 1 : 0;
 }
 
 /* -------------------------------- Camera -------------------------------- */
@@ -2462,7 +2669,7 @@ function stepIntroCamera(dt) {
 
 /* --------------------------------- Sound --------------------------------- */
 const sfx = (() => {
-  let ctx = null, master = null, eng = null, skid = null, horn = null, noise = null;
+  let ctx = null, master = null, skid = null, noise = null, city = null, hornWas = false, lastT = 0;
   let on = store.get('sound', true);
   function init() {
     if (ctx) { ctx.resume?.(); return; }
@@ -2470,51 +2677,44 @@ const sfx = (() => {
     if (!AC) return;
     ctx = new AC();
     master = ctx.createGain();
-    master.gain.value = on ? 0.5 : 0;
+    master.gain.value = on ? 0.8 : 0;
     master.connect(ctx.destination);
     noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
     const nd = noise.getChannelData(0);
     for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
-    // Engine: a sawtooth and a sub-octave square through a lowpass that opens with the throttle.
-    const o1 = ctx.createOscillator(); o1.type = 'sawtooth';
-    const o2 = ctx.createOscillator(); o2.type = 'square';
-    const o2g = ctx.createGain(); o2g.gain.value = 0.45;
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.Q.value = 3;
-    const g = ctx.createGain(); g.gain.value = 0;
-    o1.connect(lp); o2.connect(o2g); o2g.connect(lp); lp.connect(g); g.connect(master);
-    o1.start(); o2.start();
-    eng = { o1, o2, lp, g };
+    // Engines, wind, horns and crashes: Slop New York's synthesised voices (nyc/audio.js), the traffic placed in 3D.
+    city = new CityAudio(ctx, master, { small: LOW_POWER });
     // Tyre squeal: looping noise through a narrow band.
     const ns = ctx.createBufferSource(); ns.buffer = noise; ns.loop = true;
     const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1900; bp.Q.value = 6;
     const sg = ctx.createGain(); sg.gain.value = 0;
     ns.connect(bp); bp.connect(sg); sg.connect(master); ns.start();
     skid = sg;
-    // Horn: two detuned squares.
-    const hg = ctx.createGain(); hg.gain.value = 0;
-    const hl = ctx.createBiquadFilter(); hl.type = 'lowpass'; hl.frequency.value = 1800;
-    for (const f of [392, 494]) { const o = ctx.createOscillator(); o.type = 'square'; o.frequency.value = f; o.connect(hl); o.start(); }
-    hl.connect(hg); hg.connect(master);
-    horn = hg;
   }
-  const GEARS = [0, 8, 15, 22, 30, 38, 50];
+  const motors = [];
   function update(P) {
     if (!ctx) return;
-    const t = ctx.currentTime;
+    const t = ctx.currentTime, dt = clamp(t - lastT, 0, 0.25);
+    lastT = t;
     const v = Math.abs(P.fwd);
-    let gi = 1;
-    while (gi < GEARS.length - 1 && v > GEARS[gi]) gi++;
-    const frac = clamp((v - GEARS[gi - 1]) / (GEARS[gi] - GEARS[gi - 1]), 0, 1);
-    const rev = 0.15 + frac * 0.85 + (v < 1 ? input.gas * 0.35 : 0);
-    const f = 32 + rev * 95;
-    eng.o1.frequency.setTargetAtTime(f, t, 0.05);
-    eng.o2.frequency.setTargetAtTime(f / 2, t, 0.05);
-    eng.lp.frequency.setTargetAtTime(260 + input.gas * 900 + rev * 400, t, 0.08);
-    eng.g.gain.setTargetAtTime(P.sinking > 0 ? 0 : 0.07 + input.gas * 0.07, t, 0.1);
+    // Power against the throttle, plus what holding a speed takes (rolling resistance and drag).
+    const load = P.sinking > 0 ? 0 : clamp(input.gas * (input.boost ? 1 : 0.8) + clamp(v / 2, 0, 1) * (0.12 + 0.28 * clamp(v / 30, 0, 1) ** 2), 0, 1);
+    // The nearest traffic, nearest first.
+    motors.length = 0;
+    traffic.forEach((tr, n) => {
+      if (!tr.route) return;
+      const d = Math.hypot(tPos.x[n] - player.x, tPos.z[n] - player.z);
+      if (d > 180) return;
+      motors.push({ id: n, d, kind: TRAFFIC_KINDS[tr.kind][0] === 'suv' ? 'suv' : 'sedan', x: tPos.x[n], y: tr.y + 0.6, z: tPos.z[n],
+        speed: tr.speed, load: tr.brake ? 0.05 : 0.3, heading: tPos.h[n], seed: n * 0.618, blocked: tr.speed < 0.5 && tr.bump <= 0 && d < 18 });
+    });
+    motors.sort((a, b) => a.d - b.d);
+    city.update(dt, camera, { speed: P.sinking > 0 ? 0 : v, load }, motors, { night: nightU.value, traffic: clamp(motors.length / 8, 0, 1) });
     const slide = Math.abs(P.lat);
     const squeal = P.surf !== 0 && !P.sinking ? clamp((slide - 3) / 8, 0, 1) * 0.16 : 0;
     skid.gain.setTargetAtTime(squeal, t, 0.06);
-    horn.gain.setTargetAtTime(input.horn ? 0.09 : 0, t, 0.02);
+    if (input.horn && !hornWas) city.emit('horn', { x: P.x, y: P.y + 0.8, z: P.z, heading: P.h, seed: 4 }, { intensity: 0.7 });
+    hornWas = input.horn;
   }
   function burst(dur, freq, vol, type = 'lowpass') {
     if (!ctx || !on) return;
@@ -2531,12 +2731,8 @@ const sfx = (() => {
   return {
     init, update,
     crash(k) {
-      burst(0.35, 600, 0.5 * k + 0.15);
-      if (!ctx || !on) return;
-      const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime;
-      o.frequency.setValueAtTime(120, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.2);
-      g.gain.setValueAtTime(0.5 * k + 0.1, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
-      o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.3);
+      if (!city || !on) return;
+      city.emit('crash', { x: player.x, y: player.y + 0.5, z: player.z, seed: Math.random() * 1000 }, { severity: k, intensity: 0.12 + 0.88 * Math.sqrt(k) });
     },
     splash() {
       const f = burst(1.2, 1200, 0.45);
@@ -2552,7 +2748,7 @@ const sfx = (() => {
       });
     },
     get on() { return on; },
-    set on(v) { on = v; store.set('sound', v); if (master) master.gain.setTargetAtTime(v ? 0.5 : 0, ctx.currentTime, 0.05); },
+    set on(v) { on = v; store.set('sound', v); if (master) master.gain.setTargetAtTime(v ? 0.8 : 0, ctx.currentTime, 0.05); },
     pause(p) { if (ctx) (p ? ctx.suspend() : ctx.resume())?.catch?.(() => {}); },
   };
 })();
@@ -2874,6 +3070,18 @@ function renderSoundBtn() {
 renderSoundBtn();
 soundBtn.addEventListener('click', () => { sfx.on = !sfx.on; renderSoundBtn(); });
 document.getElementById('camBtn').addEventListener('click', cycleCam);
+const TIME_ICONS = {
+  sunset: '<path d="M3 18h18M7 18a5 5 0 0 1 10 0M12 4v4M4.9 9.9l1.4 1.4M19.1 9.9l-1.4 1.4"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  dusk: '<path d="M3 18h18M6 14a6 6 0 0 1 12 0"/><path d="M17 4.5a3 3 0 0 0 2.5 4.5 3.2 3.2 0 0 1-2.5-4.5Z"/>',
+  moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/>',
+};
+onTime.push((T) => {
+  document.getElementById('timeIcon').innerHTML = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${TIME_ICONS[T.icon]}</svg>`;
+  document.getElementById('timeName').textContent = T.name;
+});
+function cycleTime() { applyTime((timeIdx + 1) % TIMES.length); toast(TIMES[timeIdx].name); }
+document.getElementById('timeBtn').addEventListener('click', cycleTime);
 document.getElementById('pauseBtn').addEventListener('click', () => togglePause());
 
 window.addEventListener('keydown', (e) => {
@@ -2889,6 +3097,7 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   keys.add(k);
   if (k === 'c') cycleCam();
+  if (k === 't') cycleTime();
   if (k === 'm') mapOpen ? closeMap() : openMap();
   if (k === '/') { e.preventDefault(); keys.delete(k); openSearch(); }
   if (k === 'r' && !paused) { placeOnRoad(player.x, player.z, player.h); toast('Back on the road'); }
@@ -3010,6 +3219,9 @@ loadCity().catch((err) => {
 function resize() {
   const w = host.clientWidth, h = host.clientHeight;
   renderer.setSize(w, h, false);
+  composer.setPixelRatio(pixelRatio);
+  composer.setSize(w, h);
+  gradePass.uniforms.aspect.value = w / h;
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
@@ -3041,6 +3253,7 @@ function loop(now = performance.now()) {
     readInput();
     if (chunkAt(player.x, player.z)) stepCar(dt);   // after a long jump, wait for the ground to arrive
     stepTraffic(dt);
+    stepPeople(dt);
     checkLandmarks();
     sfx.update(player);
   } else if (!started) {
@@ -3060,17 +3273,21 @@ function loop(now = performance.now()) {
   fitShadowCatcher(Math.round(player.x), Math.round(player.z));
   sky.position.copy(camera.position);
   if (indexLoaded) stepDetail();
+  trees.timeU.value = now / 1000;
+  trees.update(camera.position);
   if (started && frame % 2 === 0) { drawMini(); updateHud(); }
   if (started) watchPerf(dt);
-  renderer.render(scene, camera);
+  composer.render();
 }
+applyTime(timeIdx);
 loop();
 if (location.hash === '#debug') {
   // Test hook: run the simulation in fixed steps, independent of frame rate.
   window.__dbg = {
     player, input, camState, keys, traffic, tPos, placeOnRoad, surfaceAt, deckAt, groundH, bridges, cityXZ, scene, shadowCatcher, chunks, readyChunks, MAP, renderer, camera, stepDetail, stepStreaming,
     /** Render one frame from a given camera spot (screenshots while frames are paused). */
-    view(x, y, z, lx, ly, lz) { dbgCam = true; camera.position.set(x, y, z); camera.lookAt(lx, ly, lz); sky.position.copy(camera.position); for (let i = 0; i < 40; i++) { stepStreaming(0.3); stepDetail(); } renderer.render(scene, camera); },
+    view(x, y, z, lx, ly, lz) { dbgCam = true; camera.position.set(x, y, z); camera.lookAt(lx, ly, lz); sky.position.copy(camera.position); for (let i = 0; i < 40; i++) { stepStreaming(0.3); stepDetail(); } trees.update(camera.position); composer.render(); },
+    applyTime, THREE, TIMES, hemi, sun, roadMat, cityMat, composer, people, crowd,
     sim(sec, held = []) {
       keys.clear();
       held.forEach(k => keys.add(k));
