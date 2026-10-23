@@ -370,6 +370,7 @@ import { PersonCrowd, PersonRig } from './nyc/pedestrians.js';
 import { CityAudio } from './nyc/audio.js';
 import { createTreeField } from './mpls-trees.js';
 import { createModes } from './mpls-modes.js';
+import { createStadium } from './mpls-stadium.js';
 
 /* =====================================================================
    Mpls Drive — a third-person toy car loose in Balloon Escape's
@@ -1572,6 +1573,19 @@ function heroGeo(G, S, hx) {
   }
 }
 
+// US Bank Stadium's footprint keeps its collision but is drawn by mpls-stadium.js: prow, zinc, ETFE roof and glass doors.
+const STADIUM_XZ = cityXZ(44.97372, -93.25748);
+const isStadium = (b, x, z) => b[2] >= 700 && Math.hypot(x - STADIUM_XZ[0], z - STADIUM_XZ[1]) < 150;
+function stadiumMeshes(ch, b) {
+  const ring = [];
+  for (let e = 0; e < b[6]; e++) ring.push([b[7 + e * 2], b[8 + e * 2]]);
+  const s = seat(ring);
+  for (const m of createStadium({ ring, base: s.y, foot: s.foot, night: nightU, castShadow: !LOW_POWER })) {
+    scene.add(m);
+    ch.objects.push(m);
+  }
+}
+
 /** Lay a tile's big buildings into 500 m pieces and set up the rest to be built when the camera comes near. */
 function buildChunkCity(ch, data) {
   const pieces = new Map();
@@ -1590,6 +1604,7 @@ function buildChunkCity(ch, data) {
     const n = b[6];
     for (let e = 0; e < n; e++) { cx += b[7 + e * 2]; cz += b[8 + e * 2]; }
     building(null, S, b.slice());
+    if (isStadium(b, cx / n, cz / n)) { stadiumMeshes(ch, b); continue; }
     building(pieceAt(cx / n, cz / n).G, null, b.slice());
   }
   for (const hx of data.hx || []) heroGeo(pieceAt(hx.x, hx.z).G, S, hx);
