@@ -309,13 +309,17 @@ import * as THREE from 'three/webgpu';
 import {
   Fn, uniform, texture, uv, attribute, vertexColor, positionWorld, normalWorld, cameraPosition, instancedBufferAttribute,
   materialRoughness, float, vec2, vec3, vec4, mix, smoothstep, step, clamp as tclamp, max, min, abs, floor, fract, dot,
-  normalize, cross, length, sin, round, dFdx, dFdy, select, normalMap, pass,
+  normalize, cross, length, sin, round, dFdx, dFdy, select, normalMap, pass, mrt, output, normalView, positionView,
+  roughness, metalness,
 } from 'three/tsl';
+import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 // Slop New York's modules (nyc/README.md): its lighting, colour grade, materials, cars, people and sound.
 import { LightingSystem } from './nyc/lighting.js';
 import { createPostProcessing } from './nyc/post-processing.js';
-import { cityUniforms } from './nyc/tsl-materials.js';
+import {
+  cityUniforms, createRoadSurfaceMaterial, createRoadPaintMaterial, createSidewalkMaterial, createCurbMaterial,
+} from './nyc/tsl-materials.js';
 import { BODY_SPECS, buildCarGeometry, buildCarProxyGeometry, buildSteerableWheelGeo, createLoftedCarMaterial } from './nyc/actor-models.js';
 import { PersonCrowd, PersonRig } from './nyc/pedestrians.js';
 import { CityAudio } from './nyc/audio.js';
@@ -381,10 +385,10 @@ function canvas2d(w, h = w) {
    Drive adds the light on its unlit map ground and how thick the haze is:
    it has to hide the end of the ~1.5 km of city streamed round the car.   */
 const TIMES = [
-  { id: 'golden', nyc: 'golden', name: 'Golden hour', icon: 'sunset', ground: [1.02, 0.93, 0.8], shadow: 0.5, haze: 0.0011, night: 0, roomDay: 0.28, roadRough: 0.9 },
-  { id: 'midday', nyc: 'midday', name: 'Midday', icon: 'sun', ground: [1.0, 1.0, 1.0], shadow: 0.42, haze: 0.001, night: 0, roomDay: 0.35, roadRough: 0.92 },
-  { id: 'twilight', nyc: 'twilight', name: 'Blue hour', icon: 'dusk', ground: [0.5, 0.5, 0.62], shadow: 0.25, haze: 0.0012, night: 0.7, roomDay: 0.1, roadRough: 0.55 },
-  { id: 'night', nyc: 'midnight', name: 'Night', icon: 'moon', ground: [0.24, 0.26, 0.34], shadow: 0.2, haze: 0.0013, night: 1, roomDay: 0.04, roadRough: 0.5 },
+  { id: 'golden', nyc: 'golden', name: 'Golden hour', icon: 'sunset', ground: [1.02, 0.93, 0.8], shadow: 0.5, haze: 0.0011, night: 0, roomDay: 0.28, roadRough: 0.9, wet: 0.12 },
+  { id: 'midday', nyc: 'midday', name: 'Midday', icon: 'sun', ground: [1.0, 1.0, 1.0], shadow: 0.42, haze: 0.001, night: 0, roomDay: 0.35, roadRough: 0.92, wet: 0.04 },
+  { id: 'twilight', nyc: 'twilight', name: 'Blue hour', icon: 'dusk', ground: [0.5, 0.5, 0.62], shadow: 0.25, haze: 0.0012, night: 0.7, roomDay: 0.1, roadRough: 0.55, wet: 0.5 },
+  { id: 'night', nyc: 'midnight', name: 'Night', icon: 'moon', ground: [0.24, 0.26, 0.34], shadow: 0.2, haze: 0.0013, night: 1, roomDay: 0.04, roadRough: 0.5, wet: 0.62 },
 ];
 let timeIdx = clamp(TIMES.findIndex(t => t.id === store.get('time', 'golden')), 0, TIMES.length - 1);
 // Shared by Mpls Drive's own materials: how dark it is, and how the unlit map is lit.
@@ -396,9 +400,40 @@ const lighting = new LightingSystem(scene, renderer);
 const hemi = lighting.hemiLight, sun = lighting.sunLight;
 const SHADOW_R = LOW_POWER ? 50 : 90;          // the shadow catcher on the unlit map reaches this far round the car
 
-/* ---------------------------- Post-processing --------------------------- */
+/* ---------------------------- Post-processing ---------------------------
+   As in Slop New York's main.js: the scene pass also writes normals and
+   metalness / roughness, so half-resolution screen-space reflections can
+   put the lamps, lit windows and cars into the wet streets; then NYC's
+   grade and bloom. Low-power devices go without the reflections.          */
 const scenePass = pass(scene, camera);
-const grade = createPostProcessing(renderer, scenePass.getTextureNode('output'), vec4(0));
+let reflections = vec4(0);
+if (!LOW_POWER) {
+  scenePass.renderTarget.storeMultisampledColorBuffer = false;
+  const ssrFade = smoothstep(360.0, 180.0, positionView.z.negate());
+  const maxSSRRoughness = 0.75;
+  const sceneMRT = mrt({
+    output,
+    normal: normalView,
+    metalRough: vec2(roughness.lessThan(maxSSRRoughness).select(metalness.mul(ssrFade), 0), roughness),
+  });
+  sceneMRT.setBlendMode('normal', new THREE.BlendMode(THREE.MaterialBlending));
+  sceneMRT.setBlendMode('metalRough', new THREE.BlendMode(THREE.MaterialBlending));
+  scenePass.setMRT(sceneMRT);
+  const metalRough = scenePass.getTextureNode('metalRough');
+  const ssrPass = ssr(scenePass.getTextureNode('output'), scenePass.getTextureNode('depth'), scenePass.getTextureNode('normal'), {
+    metalnessNode: metalRough.r, roughnessNode: metalRough.g, camera,
+  });
+  ssrPass.resolutionScale = 0.5;
+  ssrPass.blurQuality = 1;
+  ssrPass.maxDistance.value = 42;
+  ssrPass.thickness.value = 0.85;
+  ssrPass.quality.value = 0.25;
+  ssrPass.binaryRefine = true;
+  ssrPass.intensity.value = 0.5;
+  ssrPass.screenEdgeFadeBlack = true;
+  reflections = ssrPass.mul(metalRough.r.greaterThan(0).select(smoothstep(maxSSRRoughness, 0.55, metalRough.g), 0));
+}
+const grade = createPostProcessing(renderer, scenePass.getTextureNode('output'), reflections);
 const renderPipeline = new THREE.RenderPipeline(renderer, grade.outputNode);
 
 /** Set the light, the sky, the haze and the grade to one of the looks. */
@@ -408,6 +443,8 @@ function applyTime(i) {
   lighting.applyPreset(T.nyc, true);
   lighting.uFogDensity.value = Math.max(lighting.uFogDensity.value, T.haze);
   scene.fog.density = lighting.uFogDensity.value;
+  // Minneapolis is drier than NYC's looks by day: the damp film and puddles come out in the evening.
+  cityUniforms.uRoadWetness.value = T.wet;
   grade.applyPreset(T.nyc);
   groundTintU.value.set(...T.ground);
   nightU.value = T.night;
@@ -811,7 +848,14 @@ const cityMat = makeCityMat();
 // Streets lie a couple of centimetres over the ground and the paint just over them: pulled
 // towards the camera in the depth test so they never flicker against what's beneath.
 const roadMat = makeCityMat({ side: THREE.FrontSide, roughness: 0.95, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4 });
-const paintMat = makeCityMat({ side: THREE.FrontSide, roughness: 0.7, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8 });
+// Slop New York's asphalt (patches, cracks, oil, puddles after dark), sidewalk flags, curbs and worn paint.
+const lift = (mat, k) => Object.assign(mat, { polygonOffset: true, polygonOffsetFactor: -k, polygonOffsetUnits: -2 * k });
+const nycRoadMat = lift(createRoadSurfaceMaterial(), 2);
+const nycWalkMat = lift(createSidewalkMaterial(), 2);
+const nycCurbMat = lift(createCurbMaterial(), 2);
+const nycPaintMat = lift(createRoadPaintMaterial(), 4);
+nycPaintMat.side = THREE.DoubleSide;
+if (LOW_POWER) nycPaintMat.mrtNode = null;      // no reflection buffers to keep clear without the reflections
 
 /**
  * Collects triangles with a texture layer, a tint and an occlusion value per corner, then becomes one mesh.
@@ -1236,50 +1280,85 @@ function band(G, pts, d0, d1, y, layer, col, uv) {
     }
   }
 }
-/** A dashed line: dash metres of paint every period metres. */
-function dashes(G, pts, d, width, dash, period, col) {
-  const cum = arcLengths(pts), L = cum[cum.length - 1];
-  for (let s = (L % period) / 2; s + dash <= L; s += period) {
-    band(G, subPath(pts, cum, s, s + dash), d - width / 2, d + width / 2, PAINT_Y, LAYER.paint, col, 'along');
+
+/**
+ * Road markings for Slop New York's paint material: a strip along a polyline, d metres to one side, its corners
+ * carrying the distance along (paint.x), the dash period and the share of it painted (paint.y, .z), and the way out
+ * to the strip's edge (side), which the material widens far away so thin lines don't break up.
+ */
+class PaintGeo {
+  constructor() { this.p = []; this.c = []; this.paint = []; this.side = []; }
+  vert(x, z, y, col, s, period, duty, sx, sz) {
+    this.p.push(x, groundH(x, z) + y, z);
+    this.c.push(col.r, col.g, col.b);
+    this.paint.push(s, period, duty);
+    this.side.push(sx, sz);
   }
+  strip(pts, d, width, col, period = 1, duty = 1, s0 = 0) {
+    if (pts.length < 2) return;
+    pts = densify(pts, 3);
+    const n = miters(pts), cum = arcLengths(pts), hw = width / 2;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const k = [i, i + 1].flatMap((j) => [-1, 1].map((e) => [pts[j][0] + n[j][0] * (d + e * hw), pts[j][1] + n[j][1] * (d + e * hw), cum[j] + s0, n[j][0] * e * hw, n[j][1] * e * hw]));
+      for (const q of [k[0], k[2], k[3], k[0], k[3], k[1]]) this.vert(q[0], q[1], PAINT_Y, col, q[2], period, duty, q[3], q[4]);
+    }
+  }
+  mesh(mat) {
+    if (!this.p.length) return null;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(this.p, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(new Float32Array(this.p.length).map((_, i) => (i % 3 === 1 ? 1 : 0)), 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(this.c, 3));
+    g.setAttribute('paint', new THREE.Float32BufferAttribute(this.paint, 3));
+    g.setAttribute('side', new THREE.Float32BufferAttribute(this.side, 2));
+    g.computeBoundingSphere();
+    const m = new THREE.Mesh(g, mat);
+    m.receiveShadow = true;
+    return m;
+  }
+}
+/** A dashed line: dash metres of paint every period metres. */
+function dashes(P, pts, d, width, dash, period, col) {
+  const L = arcLengths(pts).at(-1);
+  // The dashes sit centred on the stretch: the first starts (L mod period) / 2 in.
+  P.strip(pts, d, width, col, period, dash / period, period / 2 - (L % period) / 2 - dash / 2);
 }
 
 /** One street piece: its asphalt, and (stopping short of the intersections) curbs, sidewalks and markings. */
-function streetGeo(R, M, r) {
+function streetGeo(S, r) {
   const [cls, w10, lanesTag, oneway, t010, t110, n] = r;
   const pts = [];
   for (let i = 0; i < n; i++) pts.push([r[7 + i * 2] / 10, r[8 + i * 2] / 10]);
   const kind = ROAD_KINDS[cls], w = w10 / 10, hw = w / 2;
   if (kind === 'path') {
     // A trail: crushed stone for walking, asphalt for the bike paths.
-    band(R, pts, -hw, hw, WALK_Y, w > 3 ? LAYER.asphalt : LAYER.sidewalk, w > 3 ? BIKE_PATH : TRAIL, 'world');
+    band(S.trail, pts, -hw, hw, WALK_Y, w > 3 ? LAYER.asphalt : LAYER.sidewalk, w > 3 ? BIKE_PATH : TRAIL, 'world');
     return;
   }
   const freeway = /^(motorway|trunk)/.test(kind), major = /^(primary|secondary|tertiary)$/.test(kind);
-  band(R, pts, -hw, hw, ROAD_Y, LAYER.asphalt, freeway ? ASPHALT.freeway : major ? ASPHALT.major : ASPHALT.local, 'world');
+  band(S.road, pts, -hw, hw, ROAD_Y, LAYER.asphalt, freeway ? ASPHALT.freeway : major ? ASPHALT.major : ASPHALT.local, 'world');
   const cum = arcLengths(pts), L = cum[cum.length - 1];
   const s0 = t010 / 10, s1 = L - t110 / 10;
   if (s1 - s0 < 2) return;
   const inner = subPath(pts, cum, s0, s1);
   if (!freeway) {
     for (const s of [-1, 1]) {
-      band(R, inner, s * hw, s * (hw + 0.3), WALK_Y, LAYER.sidewalk, CURB, 'along');
+      band(S.curb, inner, s * hw, s * (hw + 0.3), WALK_Y, LAYER.sidewalk, CURB, 'along');
       // Downtown-style main streets have wide sidewalks to the curb; elsewhere a grass boulevard comes first.
       const [a, b] = kind === 'primary' || kind === 'secondary' ? [hw + 0.3, hw + 3.0] : [hw + 2.4, hw + 3.9];
-      band(R, inner, s * a, s * b, WALK_Y, LAYER.sidewalk, WALK, 'along');
+      band(S.walk, inner, s * a, s * b, WALK_Y, LAYER.sidewalk, WALK, 'along');
     }
   }
   const lanes = lanesTag || Math.max(1, Math.round(w / 3.6));
   if (freeway) {
-    for (const s of [-1, 1]) band(M, inner, s * (hw - 0.45), s * (hw - 0.3), PAINT_Y, LAYER.paint, s < 0 && oneway ? PAINT_YELLOW : PAINT_WHITE, 'along');
+    for (const s of [-1, 1]) S.paint.strip(inner, s * (hw - 0.375), 0.15, s < 0 && oneway ? PAINT_YELLOW : PAINT_WHITE);
   }
   if (oneway || freeway) {
-    for (let k = 1; k < lanes; k++) dashes(M, inner, -hw + w * k / lanes, 0.13, 3, 12, PAINT_WHITE);
+    for (let k = 1; k < lanes; k++) dashes(S.paint, inner, -hw + w * k / lanes, 0.13, 3, 12, PAINT_WHITE);
   } else if (major || /_link$/.test(kind)) {
     // A double yellow down the middle, and dashed white between lanes on four-lane streets.
-    band(M, inner, 0.07, 0.2, PAINT_Y, LAYER.paint, PAINT_YELLOW, 'along');
-    band(M, inner, -0.2, -0.07, PAINT_Y, LAYER.paint, PAINT_YELLOW, 'along');
-    if (lanes >= 4) for (const s of [-1, 1]) dashes(M, inner, s * hw / 2, 0.13, 3, 12, PAINT_WHITE);
+    for (const s of [-1, 1]) S.paint.strip(inner, s * 0.135, 0.13, PAINT_YELLOW);
+    if (lanes >= 4) for (const s of [-1, 1]) dashes(S.paint, inner, s * hw / 2, 0.13, 3, 12, PAINT_WHITE);
   }
 }
 /** A round patch of asphalt where streets meet, so the corners curve. */
@@ -1303,12 +1382,11 @@ function junctionGeo(R, x, z, rad) {
   }
 }
 /** Ladder-style crosswalk: white bars 0.6 m wide running with the traffic, across the whole street. */
-function crosswalkGeo(M, x, z, ang, w) {
+function crosswalkGeo(P, x, z, ang, w) {
   const ux = Math.cos(ang), uz = Math.sin(ang), nx = -uz, nz = ux;
   for (let k = -w / 2 + 0.5; k <= w / 2 - 0.3; k += 1.2) {
     const cx = x + nx * k, cz = z + nz * k;
-    const c = [[-1.5, -0.3], [1.5, -0.3], [1.5, 0.3], [-1.5, 0.3]].map(([a, b]) => [cx + ux * a + nx * b, PAINT_Y, cz + uz * a + nz * b]);
-    upQuad(M, ...c, [0, 0], [3, 0], [3, 0.6], [0, 0.6], LAYER.paint, PAINT_WHITE);
+    P.strip([[cx - ux * 1.5, cz - uz * 1.5], [cx + ux * 1.5, cz + uz * 1.5]], 0, 0.6, PAINT_WHITE);
   }
 }
 
@@ -1468,13 +1546,13 @@ function buildDetail(T) {
   for (const s of T.s) signGeo(G, B, s, ch.signs);
   const m = G.mesh(cityMat);
   if (m) out.push(m);
-  const R = new Geo(true), Mk = new Geo(true);
-  for (const r of T.rd) streetGeo(R, Mk, r);
-  for (const [x, z, r] of T.jn) junctionGeo(R, x / 10, z / 10, r / 10);
-  for (const [x, z, a, w] of T.cw) crosswalkGeo(Mk, x / 10, z / 10, a / 100, w / 10);
-  for (const [geo, mat] of [[R, roadMat], [Mk, paintMat]]) {
+  const S = { road: new Geo(true), walk: new Geo(true), curb: new Geo(true), trail: new Geo(true), paint: new PaintGeo() };
+  for (const r of T.rd) streetGeo(S, r);
+  for (const [x, z, r] of T.jn) junctionGeo(S.road, x / 10, z / 10, r / 10);
+  for (const [x, z, a, w] of T.cw) crosswalkGeo(S.paint, x / 10, z / 10, a / 100, w / 10);
+  for (const [geo, mat] of [[S.road, nycRoadMat], [S.walk, nycWalkMat], [S.curb, nycCurbMat], [S.trail, roadMat], [S.paint, nycPaintMat]]) {
     const mm = geo.mesh(mat);
-    if (mm) { mm.castShadow = mm.receiveShadow = false; out.push(mm); }
+    if (mm) { mm.castShadow = false; mm.receiveShadow = true; out.push(mm); }
   }
   if (B.p.length) {
     const g = new THREE.BufferGeometry();
