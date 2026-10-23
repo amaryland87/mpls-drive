@@ -1,8 +1,5 @@
-// Procedural street trees from Slop New York (https://github.com/mrdoob/slop-newyork, MIT, © 2026 Mr.doob:
-// see LICENSE here). Sections 1-4 (leaf atlas, species, skeleton, geometry) are NYC's own, unchanged but for the
-// import; the material (section 5) is a WebGL / GLSL port of its TSL TreeNodeMaterial, and the field (section 6)
-// streams Mpls Drive's LiDAR trees in and out by map piece instead of planting one fixed list.
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import { createTreeMaterial } from './tsl-materials.js';
 
 // js/trees.js
 // Procedural NYC street & park trees, planted by street-details.js (section 7):
@@ -809,246 +806,186 @@ function buildTreeGeometries(speciesIndex, variant, tileMeters) {
 }
 
 // =====================================================================================================================
-// 5. MATERIAL (GLSL port of NYC's createTreeMaterial): bark tubes and alpha-tested leaf cards in one draw.
-//    aTree: x leaf (1) / bark (0), y crown occlusion, z sway weight, w per-card random.
-//    aTreeData (instanced): rgb per-tree foliage tint (linear), w species + per-tree random fraction.
+// 5. TREE FIELD: per-tree level of detail, regrouped into one instanced mesh per species / variant / level
 // =====================================================================================================================
-const TREE_COMMON = `
-attribute vec4 aTree;
-attribute vec4 aTreeData;
-uniform float treeTime;
-varying vec4 vTree;
-varying vec4 vTreeData;
-vec3 treeSway(vec3 p) {
-  // Gusts rolling across the city from the west-north-west; the tree bends with height, branches bob, leaves flutter.
-  vec2 wind = vec2(0.86, -0.51);
-  vec2 at = vec2(instanceMatrix[3][0], instanceMatrix[3][2]);
-  float phase = fract(aTreeData.w) * 6.2832;
-  float gust = sin(treeTime * 0.5 - dot(at, wind) * 0.045) * 0.5 + 0.5;
-  float strength = gust * gust * 0.7 + 0.3;
-  float h = p.y / 11.0;
-  float bend = h * h;
-  float lean = (sin(treeTime * 0.85 + phase) * 0.45 + 0.55) * strength * 0.2;
-  float rock = sin(treeTime * 0.67 + phase * 1.7) * 0.06 * strength;
-  vec3 sway = vec3(wind.x * lean - wind.y * rock, 0.0, wind.y * lean + wind.x * rock) * bend;
-  float bob = sin(treeTime * 2.1 + p.x * 0.9 + p.z * 0.7 + phase) * 0.05 * aTree.z * strength;
-  float flutter = sin(treeTime * 8.0 + aTree.w * 37.0 + p.y * 2.0) * 0.03 * aTree.x * aTree.z * (strength + 0.25);
-  return p + sway + vec3(0.0, bob, 0.0) + normal * flutter;
-}`;
+const LOD_NEAR = 105; // full detail within (m)
+const LOD_MID = 420; // coarse cards & branches within; whole-crown cards beyond
+const LOD_HYSTERESIS = 6;
+// Draw distance per tier (0 park & plaza, 1 avenue & esplanade, 2 cross-street); at street level everything beyond
+// LOW_CUTOFF is behind the buildings anyway
+const MAX_DIST = [3000, 1600, 950];
+const LOW_CUTOFF = 1150;
 
-function createTreeMaterial(leafAtlas, timeU) {
-  const mat = new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, alphaTest: 0.5, roughness: 0.8, metalness: 0, map: leafAtlas });
-  mat.onBeforeCompile = (sh) => {
-    sh.uniforms.treeTime = timeU;
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\n' + TREE_COMMON)
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed = treeSway(transformed);\nvTree = aTree;\nvTreeData = aTreeData;');
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', `#include <common>
-        varying vec4 vTree;
-        varying vec4 vTreeData;
-        float treeHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-        float treeNoise(vec2 p) {
-          vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f);
-          return mix(mix(treeHash(i), treeHash(i + vec2(1.0, 0.0)), u.x), mix(treeHash(i + vec2(0.0, 1.0)), treeHash(i + vec2(1.0, 1.0)), u.x), u.y);
-        }`)
-      .replace('#include <map_fragment>', `
-        vec4 leaf = texture2D(map, vMapUv);
-        float isLeaf = vTree.x, crownAO = vTree.y;
-        float rnd = fract(vTreeData.w), species = floor(vTreeData.w);
-        // Leaves: per-tree tint x atlas brightness, some sun-yellowed and some cooler, brown twigs, darker deep inside.
-        vec3 base = vTreeData.rgb * leaf.r * 1.4;
-        float warm = smoothstep(0.62, 1.0, leaf.g) * 0.55, cool = smoothstep(0.38, 0.0, leaf.g) * 0.45;
-        vec3 leafCol = mix(mix(base, base * vec3(1.25, 1.08, 0.5), warm), base * vec3(0.8, 0.92, 1.05), cool);
-        vec3 foliage = mix(leafCol, vec3(0.069, 0.044, 0.025), leaf.b) * (crownAO * 0.45 + 0.55);
-        // Bark (uv in metres): furrowed grey-brown ridges, or the plane's olive bark flaking to cream and tan.
-        vec2 bu = vMapUv;
-        float n1 = treeNoise(vec2(bu.x * 5.0, bu.y * 1.1) + rnd * 17.0);
-        float n2 = treeNoise(bu * vec2(3.2, 1.9) + rnd * 31.0);
-        float ridge = 1.0 - abs((n1 - 0.5) * 2.0);
-        vec3 furrowed = mix(vec3(0.027, 0.019, 0.013), vec3(0.107, 0.08, 0.056), smoothstep(0.35, 0.9, ridge));
-        vec3 planeBark = mix(mix(vec3(0.125, 0.112, 0.07), vec3(0.296, 0.262, 0.173), smoothstep(0.56, 0.66, n2)), vec3(0.068, 0.05, 0.03), smoothstep(0.3, 0.22, n2));
-        vec3 bark = mix(furrowed, planeBark, step(species, 0.5)) * (crownAO * 0.4 + 0.6);
-        diffuseColor.rgb = mix(bark, foliage, isLeaf);
-        // Cards from the atlas; bark opaque from outside, its back faces dropped.
-        diffuseColor.a = mix(gl_FrontFacing ? 1.0 : 0.0, leaf.a, isLeaf);`)
-      .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = mix(0.93, 0.72 - leaf.r * 0.1, vTree.x);')
-      // Card normals are crown-shell normals on both faces: no back-face flip.
-      .replace('#include <normal_fragment_begin>', THREE.ShaderChunk.normal_fragment_begin.replace('normal *= faceDirection;', ''))
-      .replace('#include <aomap_fragment>', `
-        float treeAO = vTree.y * 0.75 + 0.25;
-        reflectedLight.indirectDiffuse *= treeAO;
-        reflectedLight.indirectSpecular *= treeAO;
-        // Light through the leaves toward the camera (Barré-Brisebois & Bouchard), strongest on the thin outer shell.
-        #if NUM_DIR_LIGHTS > 0
-          vec3 transl = vTreeData.rgb * vec3(1.0, 1.2, 0.45) * leaf.r * 1.5 * (vTree.y * 0.8 + 0.2) * vTree.x;
-          vec3 scatter = normalize(directionalLights[0].direction + normal * 0.3);
-          float through = pow(clamp(dot(normalize(vViewPosition), scatter), 0.0, 1.0), 3.0);
-          reflectedLight.directDiffuse += directionalLights[0].color * transl * through;
-        #endif`);
-  };
-  mat.customProgramCacheKey = () => 'nyc-tree';
-  // Alpha-tested in the shadow map too: dappled shadows that sway with the crowns.
-  const depth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: leafAtlas, alphaTest: 0.5 });
-  depth.onBeforeCompile = (sh) => {
-    sh.uniforms.treeTime = timeU;
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\n' + TREE_COMMON)
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed = treeSway(transformed);\nvTree = aTree;');
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec4 vTree;')
-      .replace('#include <map_fragment>', 'diffuseColor.a = mix(1.0, texture2D(map, vMapUv).a, vTree.x);');
-  };
-  depth.customProgramCacheKey = () => 'nyc-tree-depth';
-  return { mat, depth };
-}
-
-// =====================================================================================================================
-// 6. TREE FIELD: Mpls Drive's LiDAR trees, added and dropped a map piece at a time, each fitted to its measured height
-//    and spread, grouped by species / variant / level of detail into instanced meshes that follow the camera.
-// =====================================================================================================================
 function hashPos(x, y, z) {
   const s = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
   return s - Math.floor(s);
 }
 
 /**
- * opts: { lowPower, castShadow }. Returns { group, timeU, add(key, sites), remove(key), update(cameraPosition) }.
- * A site is { x, y, z, h, r }: ground position, measured height and crown radius in metres.
+ * Builds the instanced tree field for `sites` ({ x, y, z, scale, species, yaw?, sx?, sz?, tier? }) and keeps each
+ * tree's level of detail up to date from the camera of every view pass (scene.onBeforeRender). Returns
+ * { group, material, atlas, update(cameraPosition) }.
  */
-function createTreeField(opts = {}) {
-  const LOD_NEAR = opts.lowPower ? 35 : 70;      // full detail within (m)
-  const LOD_MID = opts.lowPower ? 140 : 260;     // coarse cards and branches within; whole-crown cards beyond
-  const MAX_D = opts.lowPower ? 750 : 1150;
-  const HYST = 6;
+function createTreeField(scene, sites) {
   const group = new THREE.Group();
   group.name = 'Trees';
   const atlas = createLeafAtlas();
-  const timeU = { value: 0 };
-  const { mat, depth } = createTreeMaterial(atlas.texture, timeU);
+  const material = createTreeMaterial(atlas.texture);
 
-  // Geometries [species][variant][lod], and each species' own height and crown radius to fit the LiDAR sizes to.
+  // Geometries: [species][variant][lod]
   const geos = SPECIES.map((_, s) => [0, 1].map((v) => buildTreeGeometries(s, v, atlas.tileMeters)));
-  const fit = geos.map((v) => {
-    const bb = v[0][0].boundingBox;
-    return { h: bb.max.y, r: Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z) / 2 };
-  });
+
+  // Per-tree transform & data
+  const N = sites.length;
+  const mats = new Float32Array(N * 16);
+  const data = new Float32Array(N * 4);
+  const px = new Float32Array(N);
+  const py = new Float32Array(N);
+  const pz = new Float32Array(N);
+  const meshOf = new Int16Array(N * 3); // mesh index per level
+  const tier = new Uint8Array(N);
+  const lod = new Uint8Array(N).fill(255);
+
+  // Meshes: lod 0 & 1 per species & variant, lod 2 per species
   const meshes = [];
+  const counts = [];
+  const makeMesh = (geo, name) => {
+    meshes.push({ geo, name, capacity: 0 });
+    return meshes.length - 1;
+  };
   const meshIndex = SPECIES.map((sp, s) => ({
-    l: [0, 1].map((v) => [0, 1].map((l) => meshes.push({ geo: geos[s][v][l] }) - 1)),
-    far: meshes.push({ geo: geos[s][0][2] }) - 1,
+    l0: [0, 1].map((v) => makeMesh(geos[s][v][0], `Trees_${sp.name}_v${v}_lod0`)),
+    l1: [0, 1].map((v) => makeMesh(geos[s][v][1], `Trees_${sp.name}_v${v}_lod1`)),
+    l2: makeMesh(geos[s][0][2], `Trees_${sp.name}_lod2`)
   }));
+
+  const dummy = new THREE.Object3D();
+  const tint = new THREE.Color();
+  sites.forEach((t, i) => {
+    const sp = Math.min(SPECIES.length - 1, Math.max(0, t.species || 0));
+    const r1 = hashPos(t.x, 1.3, t.z);
+    const r2 = hashPos(t.z, 7.1, t.x);
+    const r3 = hashPos(t.x + t.z, 3.3, 0.7);
+    const variant = hashPos(t.x, 5.9, t.z) < 0.5 ? 0 : 1;
+    const s = t.scale * (0.9 + r1 * 0.2);
+    dummy.position.set(t.x, t.y || 0, t.z);
+    dummy.rotation.set(0, t.yaw ?? r2 * Math.PI * 2, 0);
+    dummy.scale.set(s * (0.9 + r3 * 0.2) * (t.sx || 1), s * (0.88 + r1 * 0.24), s * (0.9 + r2 * 0.2) * (t.sz || 1));
+    dummy.updateMatrix();
+    dummy.matrix.toArray(mats, i * 16);
+    tint.setHex(SPECIES[sp].tints[Math.floor(r3 * 2.999)]).multiplyScalar(0.82 + r1 * 0.36);
+    data.set([tint.r, tint.g, tint.b, sp + r2 * 0.999], i * 4);
+    px[i] = t.x;
+    py[i] = (t.y || 0) + 6 * s;
+    pz[i] = t.z;
+    tier[i] = Math.min(2, t.tier || 0);
+    const mi = meshIndex[sp];
+    meshOf[i * 3] = mi.l0[variant];
+    meshOf[i * 3 + 1] = mi.l1[variant];
+    meshOf[i * 3 + 2] = mi.l2;
+    for (let l = 0; l < 3; l++) meshes[meshOf[i * 3 + l]].capacity++;
+  });
+
   const instanced = meshes.map((m) => {
     const geo = new THREE.BufferGeometry();
     for (const name of Object.keys(m.geo.attributes)) geo.setAttribute(name, m.geo.attributes[name]);
     geo.setIndex(m.geo.index);
     geo.boundingSphere = m.geo.boundingSphere;
-    const mesh = new THREE.InstancedMesh(geo, mat, 1);
-    mesh.customDepthMaterial = depth;
+    const cap = Math.max(1, m.capacity);
+    // Static usage on purpose: three.js re-uploads a DynamicDrawUsage attribute in every render pass of every frame
+    // (both shadow cascades + the scene pass, ~7 MB/frame here). rebuild() uploads just the instances in use, and only
+    // when the levels change.
+    const treeData = new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4);
+    geo.setAttribute('aTreeData', treeData);
+    const mesh = new THREE.InstancedMesh(geo, material, cap);
+    mesh.name = m.name;
     mesh.count = 0;
     mesh.visible = false;
-    mesh.frustumCulled = false;                  // instances surround the camera: the levels do the culling
-    mesh.castShadow = !!opts.castShadow;
-    mesh.receiveShadow = !!opts.castShadow;
+    mesh.frustumCulled = false; // instances surround the camera: the per-tree levels do the culling
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
     group.add(mesh);
+    counts.push(0);
     return mesh;
   });
 
-  const pieces = new Map();
-  let all = null;                                 // flat arrays over every tree in every piece, rebuilt on change
-  const dummy = new THREE.Object3D();
-  const tint = new THREE.Color();
-  function plant(sites) {
-    const N = sites.length, P = { N, mats: new Float32Array(N * 16), data: new Float32Array(N * 4), pos: new Float32Array(N * 3), meshOf: new Int16Array(N * 3) };
-    sites.forEach((t, i) => {
-      const r1 = hashPos(t.x, 1.3, t.z), r2 = hashPos(t.z, 7.1, t.x), r3 = hashPos(t.x + t.z, 3.3, 0.7);
-      // Minneapolis: mostly elms and honey locusts on the boulevards, planes (maples, lindens) among them; the broad
-      // trees as elms, the slim ones as locusts.
-      const spread = t.r / Math.max(4, t.h);
-      const sp = spread > 0.42 ? (r1 < 0.7 ? 2 : 0) : spread < 0.3 ? (r1 < 0.6 ? 1 : 0) : Math.floor(r1 * 2.999);
-      const variant = hashPos(t.x, 5.9, t.z) < 0.5 ? 0 : 1;
-      const sy = clampN(t.h / fit[sp].h, 0.35, 2.6);
-      const sxz = clampN(t.r / fit[sp].r, sy * 0.6, sy * 1.6);
-      dummy.position.set(t.x, t.y - 0.15, t.z);
-      dummy.rotation.set(0, r2 * Math.PI * 2, 0);
-      dummy.scale.set(sxz * (0.92 + r3 * 0.16), sy, sxz * (0.92 + r2 * 0.16));
-      dummy.updateMatrix();
-      dummy.matrix.toArray(P.mats, i * 16);
-      tint.setHex(SPECIES[sp].tints[Math.floor(r3 * 2.999)]).multiplyScalar(0.82 + r1 * 0.36);
-      P.data.set([tint.r, tint.g, tint.b, sp + r2 * 0.999], i * 4);
-      P.pos.set([t.x, t.y + t.h * 0.6, t.z], i * 3);
-      const mi = meshIndex[sp];
-      P.meshOf.set([mi.l[variant][0], mi.l[variant][1], mi.far], i * 3);
-    });
-    return P;
-  }
-  function gather() {
-    let N = 0;
-    for (const P of pieces.values()) N += P.N;
-    all = { N, list: [...pieces.values()], lod: new Uint8Array(N).fill(255) };
-    const caps = new Array(instanced.length).fill(0);
-    for (const P of all.list) for (let i = 0; i < P.N * 3; i++) caps[P.meshOf[i]]++;
-    instanced.forEach((mesh, k) => {
-      if (mesh.instanceMatrix.count >= caps[k] && mesh.instanceMatrix.count < caps[k] * 3 + 64) return;
-      const cap = Math.max(1, Math.ceil(caps[k] * 1.3));
-      mesh.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(cap * 16), 16);
-      mesh.geometry.setAttribute('aTreeData', new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4));
-      mesh.geometry.dispose();                    // let three.js drop the old instance buffers
-    });
-    last.set(Infinity, Infinity, Infinity);
-  }
-  const counts = new Array(instanced.length).fill(0);
+  // Regroup every visible tree into the mesh of its level
   function rebuild() {
     counts.fill(0);
-    let o = 0;
-    for (const P of all.list) {
-      for (let i = 0; i < P.N; i++) {
-        const l = all.lod[o + i];
-        if (l === 255) continue;
-        const mi = P.meshOf[i * 3 + l], mesh = instanced[mi], c = counts[mi]++;
-        mesh.instanceMatrix.array.set(P.mats.subarray(i * 16, i * 16 + 16), c * 16);
-        mesh.geometry.attributes.aTreeData.array.set(P.data.subarray(i * 4, i * 4 + 4), c * 4);
-      }
-      o += P.N;
+    for (let i = 0; i < N; i++) {
+      const l = lod[i];
+      if (l === 255) continue;
+      const mi = meshOf[i * 3 + l];
+      const mesh = instanced[mi];
+      const c = counts[mi]++;
+      mesh.instanceMatrix.array.set(mats.subarray(i * 16, i * 16 + 16), c * 16);
+      mesh.geometry.attributes.aTreeData.array.set(data.subarray(i * 4, i * 4 + 4), c * 4);
     }
     instanced.forEach((mesh, mi) => {
       const n = counts[mi];
-      if (n > 0) for (const attr of [mesh.instanceMatrix, mesh.geometry.attributes.aTreeData]) {
-        attr.clearUpdateRanges();
-        attr.addUpdateRange(0, n * attr.itemSize);
-        attr.needsUpdate = true;
+      if (n > 0) {
+        // upload only the instances in use (main.js swaps instanceMatrix for a storage attribute: look it up here)
+        for (const attr of [mesh.instanceMatrix, mesh.geometry.attributes.aTreeData]) {
+          attr.clearUpdateRanges();
+          attr.addUpdateRange(0, n * attr.itemSize);
+          attr.needsUpdate = true;
+        }
       }
       mesh.count = n;
       mesh.visible = n > 0;
     });
   }
-  const last = new THREE.Vector3(Infinity, Infinity, Infinity);
-  let dirty = false;
-  function update(cam) {
-    if (dirty) { gather(); dirty = false; }
-    if (!all || cam.distanceToSquared(last) < 16) return;
+
+  // Levels from the camera position (3D distance to mid-crown), with hysteresis at every boundary
+  const last = new V3(Infinity, Infinity, Infinity);
+  const cam = new V3();
+  function update(position) {
+    cam.copy(position);
+    if (cam.distanceToSquared(last) < 16) return false;
     last.copy(cam);
-    let changed = false, o = 0;
-    for (const P of all.list) {
-      for (let i = 0; i < P.N; i++, o++) {
-        const dx = P.pos[i * 3] - cam.x, dy = P.pos[i * 3 + 1] - cam.y, dz = P.pos[i * 3 + 2] - cam.z;
-        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        const cur = all.lod[o] === 255 ? 3 : all.lod[o];
-        let next = d < LOD_NEAR ? 0 : d < LOD_MID ? 1 : d < MAX_D ? 2 : 3;
-        if (Math.abs(next - cur) === 1 && Math.abs(d - [LOD_NEAR, LOD_MID, MAX_D][Math.min(next, cur)]) < HYST) next = cur;
-        const v = next === 3 ? 255 : next;
-        if (v !== all.lod[o]) { all.lod[o] = v; changed = true; }
+    const low = cam.y < 40;
+    let changed = false;
+    for (let i = 0; i < N; i++) {
+      const dx = px[i] - cam.x;
+      const dy = py[i] - cam.y;
+      const dz = pz[i] - cam.z;
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const maxD = low ? Math.min(MAX_DIST[tier[i]], LOW_CUTOFF) : MAX_DIST[tier[i]];
+      // levels 0-2, 3 = hidden; next to a boundary a tree keeps the level it has
+      const curL = lod[i] === 255 ? 3 : lod[i];
+      let nextL = d < LOD_NEAR ? 0 : d < LOD_MID ? 1 : d < maxD ? 2 : 3;
+      if (Math.abs(nextL - curL) === 1) {
+        const edge = [LOD_NEAR, LOD_MID, maxD][Math.min(nextL, curL)];
+        if (Math.abs(d - edge) < LOD_HYSTERESIS) nextL = curL;
+      }
+      const next = nextL === 3 ? 255 : nextL;
+      if (next !== lod[i]) {
+        lod[i] = next;
+        changed = true;
       }
     }
     if (changed) rebuild();
+    return changed;
   }
-  return {
-    group, timeU,
-    add(key, sites) { if (sites.length) { pieces.set(key, plant(sites)); dirty = true; } },
-    remove(key) { if (pieces.delete(key)) dirty = true; },
-    update,
-  };
-}
-const clampN = (v, a, b) => Math.max(a, Math.min(b, v));
 
-export { createTreeField };
+  // Follow the view camera of every scene render (shadow cascades are orthographic and keep the view's levels)
+  const viewPos = new V3();
+  const prevBeforeRender = scene.onBeforeRender;
+  scene.onBeforeRender = function (renderer, scn, camera, target) {
+    prevBeforeRender.call(this, renderer, scn, camera, target);
+    if (camera.isOrthographicCamera === true || camera.isArrayCamera === true) return;
+    update(viewPos.setFromMatrixPosition(camera.matrixWorld));
+  };
+
+  // Levels for the start-up view (Midtown, 5th Ave), so the precompile pass sees the tree meshes
+  update(new V3(0, 10, 140));
+
+  const stats = {
+    trees: N,
+    triangles: geos.map((v) => v.map((l) => l.map((g) => g && g.userData.triangles))),
+    cards: geos.map((v) => v.map((l) => l.map((g) => g && g.userData.cards)))
+  };
+  return { group, material, atlas, update, meshes: instanced, stats };
+}
+
+export { createTreeField, createLeafAtlas, buildTreeGeometries, SPECIES as TREE_SPECIES };

@@ -298,21 +298,28 @@
 
 <script type="importmap">
 { "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.186.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.0/examples/jsm/"
+  "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.js",
+  "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.webgpu.js",
+  "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.tsl.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
 } }
 </script>
 <script type="module">
-import * as THREE from 'three';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { createTreeField } from './nyc/trees.js';
-import { PersonCrowd, PersonRig } from './nyc/people.js';
+import * as THREE from 'three/webgpu';
+import {
+  Fn, uniform, texture, uv, attribute, vertexColor, positionWorld, normalWorld, cameraPosition, instancedBufferAttribute,
+  materialRoughness, float, vec2, vec3, vec4, mix, smoothstep, step, clamp as tclamp, max, min, abs, floor, fract, dot,
+  normalize, cross, length, sin, round, dFdx, dFdy, select, normalMap, pass,
+} from 'three/tsl';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+// Slop New York's modules (nyc/README.md): its lighting, colour grade, materials, cars, people and sound.
+import { LightingSystem } from './nyc/lighting.js';
+import { createPostProcessing } from './nyc/post-processing.js';
+import { cityUniforms } from './nyc/tsl-materials.js';
+import { BODY_SPECS, buildCarGeometry, buildCarProxyGeometry, buildSteerableWheelGeo, createLoftedCarMaterial } from './nyc/actor-models.js';
+import { PersonCrowd, PersonRig } from './nyc/pedestrians.js';
 import { CityAudio } from './nyc/audio.js';
-import { BODY_SPECS, buildCarGeometry, buildCarProxyGeometry, buildSteerableWheelGeo, createCarMaterial } from './nyc/cars.js';
+import { createTreeField } from './mpls-trees.js';
 
 /* =====================================================================
    Mpls Drive — a third-person toy car loose in Balloon Escape's
@@ -350,18 +357,15 @@ const damp = (k, dt) => 1 - Math.exp(-k * dt);
 /* ------------------------------ Renderer ------------------------------ */
 const host = document.getElementById('scene');
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog('#c8e0ee', 140, 1300);
 const camera = new THREE.PerspectiveCamera(62, 1, 0.3, 1700);
-const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+// three.js's WebGPU renderer, as in Slop New York: WebGPU where the browser has it, WebGL 2 where it doesn't.
+const renderer = new THREE.WebGPURenderer({ antialias: true, powerPreference: 'high-performance' });
 let pixelRatio = Math.min(window.devicePixelRatio, LOW_POWER ? 1.5 : 2);
 renderer.setPixelRatio(pixelRatio);
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1;
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFShadowMap;
 host.appendChild(renderer.domElement);
-const MAX_ANISO = renderer.capabilities.getMaxAnisotropy();
+await renderer.init();
+const MAX_ANISO = renderer.getMaxAnisotropy();
 
 function canvas2d(w, h = w) {
   const c = document.createElement('canvas');
@@ -370,189 +374,51 @@ function canvas2d(w, h = w) {
 }
 
 /* ----------------------------- Time of day -----------------------------
-   Four looks, after Slop New York's: the sun's way and colour, the sky, the
-   haze, the light bounced off the city and the camera's grade all move
-   together. Night lights the windows, the street lamps and the car lamps.
-   x east, z south: the evening sun stands in the west-north-west.        */
+   Slop New York's lighting (nyc/lighting.js): a physical sky with clouds,
+   the sun with two cascades of shadow following the camera, the sky baked
+   into the reflections, haze that takes the sky's colour, and NYC's four
+   looks with its colour grade and bloom (nyc/post-processing.js). Mpls
+   Drive adds the light on its unlit map ground and how thick the haze is:
+   it has to hide the end of the ~1.5 km of city streamed round the car.   */
 const TIMES = [
-  { id: 'golden', name: 'Golden hour', icon: 'sunset',
-    sunDir: [-0.74, 0.34, -0.36], sunColor: '#ffc68c', sunI: 4.2, hemiSky: '#9cbbe0', hemiGround: '#b98e6a', hemiI: 1.9,
-    zenith: '#3263a0', horizon: '#f0cfa8', haze: '#f7dcbc', glow: '#ffb070', fog: '#e2c9ae', fogNear: 120, fogFar: 1300,
-    env: 1.0, ground: [1.02, 0.93, 0.8], shadow: 0.5, night: 0, stars: 0, roomDay: 0.28, roadRough: 0.9,
-    exposure: 1.0, balance: [1.04, 1.0, 0.955], contrast: 1.12, saturation: 1.08, bloom: 0.22, threshold: 1.2 },
-  { id: 'midday', name: 'Midday', icon: 'sun',
-    sunDir: [0.22, 0.86, 0.46], sunColor: '#fff5e8', sunI: 4.4, hemiSky: '#b0d4ff', hemiGround: '#b29a80', hemiI: 1.6,
-    zenith: '#2766b4', horizon: '#c4dcf2', haze: '#dbe8f2', glow: '#fff6e0', fog: '#c9dcee', fogNear: 160, fogFar: 1400,
-    env: 0.85, ground: [1.0, 1.0, 1.0], shadow: 0.42, night: 0, stars: 0, roomDay: 0.35, roadRough: 0.92,
-    exposure: 1.0, balance: [1.01, 1.0, 0.99], contrast: 1.1, saturation: 1.06, bloom: 0.18, threshold: 1.2 },
-  { id: 'twilight', name: 'Blue hour', icon: 'dusk',
-    sunDir: [-0.82, 0.16, -0.4], sunColor: '#ff9a6e', sunI: 1.3, hemiSky: '#5a78b4', hemiGround: '#6a5250', hemiI: 1.5,
-    zenith: '#13254d', horizon: '#c07670', haze: '#8a6f86', glow: '#ff8a5a', fog: '#3f4766', fogNear: 90, fogFar: 1100,
-    env: 0.6, ground: [0.5, 0.5, 0.62], shadow: 0.25, night: 0.7, stars: 0.25, roomDay: 0.1, roadRough: 0.55,
-    exposure: 1.05, balance: [1.02, 0.995, 1.02], contrast: 1.1, saturation: 1.08, bloom: 0.42, threshold: 0.75 },
-  { id: 'night', name: 'Night', icon: 'moon',
-    sunDir: [0.4, 0.62, -0.62], sunColor: '#8cb0e8', sunI: 0.55, hemiSky: '#29406c', hemiGround: '#352c34', hemiI: 1.3,
-    zenith: '#050b18', horizon: '#18253e', haze: '#1e2a40', glow: '#304a74', fog: '#121a2a', fogNear: 70, fogFar: 1000,
-    env: 0.35, ground: [0.24, 0.26, 0.34], shadow: 0.2, night: 1, stars: 1, roomDay: 0.04, roadRough: 0.5,
-    exposure: 1.1, balance: [0.985, 1.0, 1.04], contrast: 1.08, saturation: 1.05, bloom: 0.55, threshold: 0.6 },
+  { id: 'golden', nyc: 'golden', name: 'Golden hour', icon: 'sunset', ground: [1.02, 0.93, 0.8], shadow: 0.5, haze: 0.0011, night: 0, roomDay: 0.28, roadRough: 0.9 },
+  { id: 'midday', nyc: 'midday', name: 'Midday', icon: 'sun', ground: [1.0, 1.0, 1.0], shadow: 0.42, haze: 0.001, night: 0, roomDay: 0.35, roadRough: 0.92 },
+  { id: 'twilight', nyc: 'twilight', name: 'Blue hour', icon: 'dusk', ground: [0.5, 0.5, 0.62], shadow: 0.25, haze: 0.0012, night: 0.7, roomDay: 0.1, roadRough: 0.55 },
+  { id: 'night', nyc: 'midnight', name: 'Night', icon: 'moon', ground: [0.24, 0.26, 0.34], shadow: 0.2, haze: 0.0013, night: 1, roomDay: 0.04, roadRough: 0.5 },
 ];
 let timeIdx = clamp(TIMES.findIndex(t => t.id === store.get('time', 'golden')), 0, TIMES.length - 1);
-// Shared by every material that needs them: where the sun is, how dark it is, and how the unlit map is lit.
-const sunDirU = { value: new THREE.Vector3(...TIMES[timeIdx].sunDir).normalize() };
-const nightU = { value: 0 };
-const groundTintU = { value: new THREE.Vector3(1, 1, 1) };
-const SUN_OFFSET = new THREE.Vector3();
+// Shared by Mpls Drive's own materials: how dark it is, and how the unlit map is lit.
+const nightU = uniform(0);
+const groundTintU = uniform(new THREE.Vector3(1, 1, 1));
+const roomDayU = uniform(0.3);
 
-/* --------------------------------- Sky --------------------------------- */
-const skyMat = new THREE.ShaderMaterial({
-  side: THREE.BackSide, depthWrite: false, fog: false,
-  uniforms: {
-    zenith: { value: new THREE.Color() }, horizon: { value: new THREE.Color() }, haze: { value: new THREE.Color() },
-    glow: { value: new THREE.Color() }, sunDir: sunDirU, sunCol: { value: new THREE.Color() }, stars: { value: 0 }, sunDisc: { value: 1 },
-  },
-  vertexShader: `
-    varying vec3 vDir;
-    void main() { vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-  fragmentShader: `
-    uniform vec3 zenith; uniform vec3 horizon; uniform vec3 haze; uniform vec3 glow; uniform vec3 sunDir; uniform vec3 sunCol;
-    uniform float stars; uniform float sunDisc; varying vec3 vDir;
-    float hash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
-    void main() {
-      vec3 d = normalize(vDir);
-      float h = d.y;
-      vec3 col = mix(horizon, zenith, pow(clamp(h, 0.0, 1.0), 0.55));
-      col = mix(col, haze, pow(clamp(1.0 - abs(h) * 8.0, 0.0, 1.0), 1.6) * 0.65);
-      col = mix(col, haze * 0.9, pow(clamp(-h, 0.0, 1.0), 0.8) * 0.5);
-      // Toward the sun the haze lights up (a broad Mie lobe and a tight one), brightest near the horizon.
-      float mu = max(dot(d, normalize(sunDir)), 0.0);
-      float low = 1.0 - clamp(h * 2.5, 0.0, 1.0);
-      col += glow * (pow(mu, 6.0) * 0.55 * (0.4 + 0.6 * low) + pow(mu, 48.0) * 0.8);
-      col += sunCol * smoothstep(0.99955, 0.9998, mu) * 24.0 * sunDisc;
-      // Stars: a cell grid on the sky dome, twinkle-free, fading into the city glow at the horizon.
-      if (stars > 0.0) {
-        vec3 c = floor(d * 260.0);
-        float s = hash(c);
-        float star = step(0.9965, s) * smoothstep(0.08, 0.35, h) * (0.4 + 0.6 * hash(c + 7.0));
-        col += vec3(0.9, 0.95, 1.0) * star * stars * 1.6;
-      }
-      gl_FragColor = vec4(col, 1.0);
-    }`,
-});
-const sky = new THREE.Mesh(new THREE.SphereGeometry(1200, 48, 24), skyMat);
-sky.frustumCulled = false;
-sky.renderOrder = -2;
-scene.add(sky);
+const lighting = new LightingSystem(scene, renderer);
+const hemi = lighting.hemiLight, sun = lighting.sunLight;
+const SHADOW_R = LOW_POWER ? 50 : 90;          // the shadow catcher on the unlit map reaches this far round the car
 
-// The sky pre-filtered into an environment map, so paint and glass reflect sky above and ground below.
-const pmrem = new THREE.PMREMGenerator(renderer);
-const envGround = new THREE.MeshBasicMaterial({ color: '#98a382', side: THREE.BackSide });
-const envScene = new THREE.Scene();
-envScene.add(new THREE.Mesh(new THREE.SphereGeometry(50, 32, 16), skyMat));
-envScene.add(new THREE.Mesh(new THREE.SphereGeometry(49, 16, 8, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2), envGround));
-let envRT = null;
+/* ---------------------------- Post-processing --------------------------- */
+const scenePass = pass(scene, camera);
+const grade = createPostProcessing(renderer, scenePass.getTextureNode('output'), vec4(0));
+const renderPipeline = new THREE.RenderPipeline(renderer, grade.outputNode);
 
-const hemi = new THREE.HemisphereLight('#dceeff', '#a8a88c', 0.75);
-scene.add(hemi);
-const sun = new THREE.DirectionalLight('#fff4de', 2.4);
-sun.castShadow = true;
-const SHADOW_R = LOW_POWER ? 28 : 45;
-sun.shadow.mapSize.set(LOW_POWER ? 1024 : 2048, LOW_POWER ? 1024 : 2048);
-Object.assign(sun.shadow.camera, { left: -SHADOW_R, right: SHADOW_R, top: SHADOW_R, bottom: -SHADOW_R, near: 10, far: 400 });
-sun.shadow.bias = -0.0006;
-sun.shadow.normalBias = 0.04;
-scene.add(sun, sun.target);
-
-/** Set every light, the sky, the haze and the grade to one of the looks. */
+/** Set the light, the sky, the haze and the grade to one of the looks. */
 function applyTime(i) {
   timeIdx = i;
   const T = TIMES[i];
-  sunDirU.value.set(...T.sunDir).normalize();
-  SUN_OFFSET.copy(sunDirU.value).multiplyScalar(170);
-  sun.color.set(T.sunColor); sun.intensity = T.sunI;
-  hemi.color.set(T.hemiSky); hemi.groundColor.set(T.hemiGround); hemi.intensity = T.hemiI;
-  const U = skyMat.uniforms;
-  U.zenith.value.set(T.zenith); U.horizon.value.set(T.horizon); U.haze.value.set(T.haze); U.glow.value.set(T.glow);
-  U.sunCol.value.set(T.sunColor); U.stars.value = T.stars; U.sunDisc.value = T.night >= 1 ? 0.06 : 1;
-  scene.fog.color.set(T.fog); scene.fog.near = T.fogNear; scene.fog.far = T.fogFar;
+  lighting.applyPreset(T.nyc, true);
+  lighting.uFogDensity.value = Math.max(lighting.uFogDensity.value, T.haze);
+  scene.fog.density = lighting.uFogDensity.value;
+  grade.applyPreset(T.nyc);
   groundTintU.value.set(...T.ground);
-  envGround.color.set(T.hemiGround).multiplyScalar(0.8);
   nightU.value = T.night;
   roomDayU.value = T.roomDay;
   // After dark the streets have a damp sheen that catches the lamps and the headlights.
   roadMat.roughness = T.roadRough;
   shadowCatcher.material.opacity = T.shadow;
-  // The sun's disc stays out of the reflections: the lights already make its highlight, and a disc 24 times
-  // brighter than the sky would glare off every roof once blurred into the environment map.
-  const disc = U.sunDisc.value;
-  U.sunDisc.value = 0;
-  if (envRT) envRT.dispose();
-  envRT = pmrem.fromScene(envScene, 0, 1, 100);
-  U.sunDisc.value = disc;
-  scene.environment = envRT.texture;
-  scene.environmentIntensity = T.env;
-  grade.apply(T);
   for (const f of onTime) f(T);
   store.set('time', T.id);
 }
 const onTime = [];
-
-/* ---------------------------- Post-processing ---------------------------
-   As in Slop New York: the scene is drawn in linear HDR, exposed and white-
-   balanced, lens bloom added from what's brighter than white (lamps, lit
-   windows, the low sun), then graded (cool shadows, warm highlights,
-   contrast round middle grey, saturation, a faint vignette) and only then
-   tone-mapped (ACES) and converted to sRGB, once.                         */
-const composer = (() => {
-  const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: LOW_POWER ? 0 : 4 });
-  const c = new EffectComposer(renderer, rt);
-  c.addPass(new RenderPass(scene, camera));
-  return c;
-})();
-const exposePass = new ShaderPass({
-  uniforms: { tDiffuse: { value: null }, exposure: { value: 1 }, balance: { value: new THREE.Vector3(1, 1, 1) } },
-  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-  fragmentShader: `
-    uniform sampler2D tDiffuse; uniform float exposure; uniform vec3 balance; varying vec2 vUv;
-    void main() { gl_FragColor = vec4(max(texture2D(tDiffuse, vUv).rgb, 0.0) * exposure * balance, 1.0); }`,
-});
-const bloomPass = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.25, 0.45, 1.0);
-const gradePass = new ShaderPass({
-  uniforms: { tDiffuse: { value: null }, contrast: { value: 1 }, saturation: { value: 1 }, aspect: { value: 1 } },
-  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-  fragmentShader: `
-    uniform sampler2D tDiffuse; uniform float contrast; uniform float saturation; uniform float aspect; varying vec2 vUv;
-    void main() {
-      vec3 color = texture2D(tDiffuse, vUv).rgb;
-      float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-      // Cool shadows, warm highlights: multiplied, so black stays black.
-      color *= mix(vec3(0.965, 1.005, 1.045), vec3(1.0), smoothstep(0.02, 0.6, luma));
-      color *= mix(vec3(1.0), vec3(1.035, 1.005, 0.965), smoothstep(0.6, 3.0, luma));
-      // Contrast round middle grey, scaling the channels together.
-      color *= pow(max(luma, 0.0001) / 0.18, contrast - 1.0);
-      float gray = dot(color, vec3(0.2126, 0.7152, 0.0722));
-      float hi = max(max(color.r, color.g), color.b), lo = min(min(color.r, color.g), color.b);
-      float vibrance = 0.1 * (1.0 - (hi - lo) / max(hi, 0.0001));
-      color = max(mix(vec3(gray), color, saturation + vibrance), 0.0);
-      vec2 q = (vUv - 0.5) * vec2(aspect, 1.0);
-      float radius = length(q) / length(vec2(aspect, 1.0) * 0.5);
-      color *= 1.0 - smoothstep(0.35, 1.0, radius) * 0.12;
-      gl_FragColor = vec4(color, 1.0);
-    }`,
-});
-composer.addPass(exposePass);
-composer.addPass(bloomPass);
-composer.addPass(gradePass);
-composer.addPass(new OutputPass());
-const grade = {
-  apply(T) {
-    exposePass.uniforms.exposure.value = T.exposure;
-    exposePass.uniforms.balance.value.set(...T.balance);
-    gradePass.uniforms.contrast.value = T.contrast;
-    gradePass.uniforms.saturation.value = T.saturation;
-    bloomPass.strength = T.bloom;
-    bloomPass.threshold = T.threshold;
-  },
-};
 
 /* ---------------------------- Lie of the land ----------------------------
    The ground's real height from the 2022 LiDAR survey (city/ground.bin, made by
@@ -611,43 +477,43 @@ const grain = (() => {
 // The sharp tiles fade out over the last stretch of the map, onto the wide map below.
 const mapBounds = new THREE.Vector4(MAP.x0, MAP.x1, MAP.z0, MAP.z1);
 const noBounds = new THREE.Vector4(-1e6, 1e6, -1e6, 1e6);
+const solidTexture = (hex) => {
+  const c = new THREE.Color(hex);
+  const t = new THREE.DataTexture(new Uint8Array([c.r * 255, c.g * 255, c.b * 255, 255]), 1, 1);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.needsUpdate = true;
+  return t;
+};
+/** The map as the ground: unlit (the map has its light and shade baked in), with grain, slopes shaded by hand. */
 function groundMaterial(bounds, detail = 0) {
-  const mat = new THREE.MeshBasicMaterial({ color: '#a9d17c' });
-  mat.onBeforeCompile = (sh) => {
-    sh.uniforms.grainMap = { value: grain };
-    sh.uniforms.mapBounds = { value: bounds };
-    sh.uniforms.facadeColor = facadeU.color;
-    sh.uniforms.detailOn = { value: detail };
-    sh.uniforms.sunDir = sunDirU;
-    sh.uniforms.groundTint = groundTintU;
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec2 vGroundXZ;\nvarying vec3 vGroundN;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvGroundXZ = (modelMatrix * vec4(position, 1.0)).xz;\nvGroundN = normalize(mat3(modelMatrix) * normal);');
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nuniform sampler2D grainMap;\nuniform vec4 mapBounds;\nuniform highp sampler2DArray facadeColor;\nuniform float detailOn;\nuniform vec3 sunDir;\nuniform vec3 groundTint;\nvarying vec2 vGroundXZ;\nvarying vec3 vGroundN;')
-      .replace('#include <map_fragment>', `#include <map_fragment>
-        float fine = texture2D(grainMap, vGroundXZ * 0.35).r;
-        float broad = texture2D(grainMap, vGroundXZ * 0.021).r;
-        diffuseColor.rgb *= 0.74 + 0.12 * fine + 0.1 * broad;
-        diffuseColor.rgb = mix(vec3(dot(diffuseColor.rgb, vec3(0.333))), diffuseColor.rgb, 1.15);
-        if (detailOn > 0.5) {
-          // Real grass on the lawns and boulevards, real asphalt on the parking lots, from the map's own colours.
-          vec3 c = diffuseColor.rgb;
-          float lawn = smoothstep(0.03, 0.12, c.g - max(c.r, c.b));
-          float paved = (1.0 - lawn) * smoothstep(0.08, 0.02, max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b)));
-          vec3 grass = texture(facadeColor, vec3(vGroundXZ / 2.8, 19.0)).rgb * 1.9;
-          vec3 asph = texture(facadeColor, vec3(vGroundXZ / 4.0, 16.0)).rgb * vec3(1.05, 1.1, 1.18);
-          // Keep the map's light and shade (occlusion, canopy shadow) but take the real surface's colour.
-          float shade = dot(c, vec3(0.3, 0.6, 0.1)) / 0.55;
-          diffuseColor.rgb = mix(c, grass * min(shade, 1.1), lawn * 0.85);
-          diffuseColor.rgb = mix(diffuseColor.rgb, asph, paved * 0.7);
-        }
-        // The map is unlit, so shade the slopes by hand: brighter facing the sun, darker turned away.
-        float slopeLight = dot(normalize(vGroundN), sunDir) / sunDir.y;
-        diffuseColor.rgb *= clamp(mix(1.0, slopeLight, 0.85), 0.5, 1.3) * groundTint;
-        float edge = min(min(vGroundXZ.x - mapBounds.x, mapBounds.y - vGroundXZ.x), min(vGroundXZ.y - mapBounds.z, mapBounds.w - vGroundXZ.y));
-        diffuseColor.a *= smoothstep(0.0, 160.0, edge);`);
-  };
+  const mat = new THREE.MeshBasicNodeMaterial({ transparent: bounds !== noBounds });
+  const mapNode = texture(solidTexture('#a9d17c'));
+  mat.userData.mapNode = mapNode;
+  const xz = positionWorld.xz;
+  mat.colorNode = Fn(() => {
+    const c = mapNode.rgb.toVar();
+    const fine = texture(grain, xz.mul(0.35)).r, broad = texture(grain, xz.mul(0.021)).r;
+    c.mulAssign(fine.mul(0.12).add(broad.mul(0.1)).add(0.74));
+    c.assign(mix(vec3(dot(c, vec3(0.333))), c, 1.15));
+    if (detail) {
+      // Real grass on the lawns and boulevards, real asphalt on the parking lots, from the map's own colours.
+      const lawn = smoothstep(0.03, 0.12, c.g.sub(max(c.r, c.b)));
+      const paved = float(1).sub(lawn).mul(smoothstep(0.08, 0.02, max(c.r, max(c.g, c.b)).sub(min(c.r, min(c.g, c.b)))));
+      const grass = facadeColorTex.sample(xz.div(2.8)).depth(19).rgb.mul(1.9);
+      const asph = facadeColorTex.sample(xz.div(4.0)).depth(16).rgb.mul(vec3(1.05, 1.1, 1.18));
+      // Keep the map's light and shade (occlusion, canopy shadow) but take the real surface's colour.
+      const shade = dot(c, vec3(0.3, 0.6, 0.1)).div(0.55);
+      c.assign(mix(c, grass.mul(min(shade, 1.1)), lawn.mul(0.85)));
+      c.assign(mix(c, asph, paved.mul(0.7)));
+    }
+    // The map is unlit, so shade the slopes by hand: brighter facing the sun, darker turned away.
+    const sunDir = cityUniforms.uSkySunDir;
+    const slopeLight = dot(normalize(normalWorld), sunDir).div(max(sunDir.y, 0.15));
+    return c.mul(tclamp(mix(1.0, slopeLight, 0.85), 0.5, 1.3)).mul(groundTintU);
+  })();
+  const B = uniform(new THREE.Vector4().copy(bounds));
+  const edge = min(min(xz.x.sub(B.x), B.y.sub(xz.x)), min(xz.y.sub(B.z), B.w.sub(xz.y)));
+  mat.opacityNode = smoothstep(0.0, 160.0, edge);
   return mat;
 }
 // The wide map is the bottom layer: it writes no depth, so it can never poke through the sharp tiles.
@@ -660,9 +526,7 @@ scene.add(farGround);
 new THREE.TextureLoader().load(FAR_MAP, (tex) => {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = MAX_ANISO;
-  farGround.material.map = tex;
-  farGround.material.color.set('#ffffff');
-  farGround.material.needsUpdate = true;
+  farGround.material.userData.mapNode.value = tex;
 });
 // Each tile's ground is a grid on the height nodes, laid out round the tile's centre. The uvs and the
 // triangles are the same for every tile; each diagonal runs the way groundH() expects.
@@ -695,7 +559,7 @@ function tileGroundGeo(ch) {
 // The map is unlit, so a shadow-only plane that follows the car lays the shadows onto it.
 // It's a grid laid over the ground's shape, refitted whenever the car moves on a metre.
 const shadowCatcher = new THREE.Mesh(
-  new THREE.PlaneGeometry(SHADOW_R * 2.4, SHADOW_R * 2.4, 36, 36).rotateX(-Math.PI / 2),
+  new THREE.PlaneGeometry(SHADOW_R * 2.4, SHADOW_R * 2.4, 72, 72).rotateX(-Math.PI / 2),
   new THREE.ShadowMaterial({ opacity: 0.38, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8 })
 );
 shadowCatcher.frustumCulled = false;
@@ -852,7 +716,10 @@ const LAYER_M = [[2.4, 3.6], [2.4, 3.6], [3, 3.6], [1.5, 3.6], [4.8, 4.5], [2.4,
 // The window-less version of each facade, for bands too short to hold a floor of windows.
 const PLAIN = [9, 10, 11, 3, 9, 6, 6, 6, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
 
-const facadeU = { color: { value: null }, normal: { value: null } };
+// Texture nodes that every city material samples; the real arrays replace the placeholders once they've loaded.
+const placeholderArray = () => { const t = new THREE.DataArrayTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, 1); t.needsUpdate = true; return t; };
+const facadeColorTex = texture(placeholderArray());
+const facadeNormalTex = texture(placeholderArray());
 async function loadFacades() {
   const n = LOW_POWER ? 256 : 512;
   const read = (file) => new Promise((res, rej) => {
@@ -876,86 +743,68 @@ async function loadFacades() {
     t.needsUpdate = true;
     return t;
   };
-  facadeU.color.value = toArray(c, true);
-  facadeU.normal.value = toArray(nm, false);
+  facadeColorTex.value = toArray(c, true);
+  facadeNormalTex.value = toArray(nm, false);
 }
 
 // A standard material whose colour and normal come from the texture array (layer per vertex), with
 // glass made shiny and trim kept untinted by the mask in the normal map's blue channel.
-const whitePixel = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
-whitePixel.needsUpdate = true;
-function cityShader(sh) {
-  sh.uniforms.facadeColor = facadeU.color;
-  sh.uniforms.facadeNormal = facadeU.normal;
-  sh.uniforms.night = nightU;
-  sh.uniforms.roomDay = roomDayU;
-  sh.vertexShader = sh.vertexShader
-    .replace('#include <common>', '#include <common>\nattribute vec2 la;\nflat varying float vLayer;\nvarying float vAo;')
-    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLayer = la.x;\nvAo = la.y / 255.0;');
-  sh.fragmentShader = sh.fragmentShader
-    .replace('#include <common>', '#include <common>\nuniform highp sampler2DArray facadeColor;\nuniform highp sampler2DArray facadeNormal;\nflat varying float vLayer;\nvarying float vAo;\n' + ROOM_GLSL)
-    .replace('#include <map_fragment>', `
-      vec4 facadeTex = texture(facadeColor, vec3(vMapUv, vLayer));
-      vec4 facadeNrm = texture(facadeNormal, vec3(vMapUv, vLayer));
-      float trimMask = smoothstep(0.2, 0.45, facadeNrm.b);
-      float glassMask = smoothstep(0.7, 0.9, facadeNrm.b);
-      diffuseColor.rgb *= facadeTex.rgb;`)
-    .replace('#include <color_fragment>', 'diffuseColor.rgb *= mix(vColor.rgb, vec3(1.0), trimMask) * vAo;')
-    .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = mix(roughness, 0.06, glassMask);\ndiffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * 0.3, glassMask * step(vLayer, 5.5));')
-    .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += glassMask * step(vLayer, 5.5) * roomLight(vMapUv, vColor.rgb + vLayer * 0.137, vLayer > 3.5 && vLayer < 4.5);')
-    .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = mix(metalness, 0.35, glassMask);')
-    .replace('vec3 mapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;',
-      'vec3 mapN = vec3(facadeNrm.rg * 2.0 - 1.0, 0.0);\n\tmapN.z = sqrt(saturate(1.0 - dot(mapN.xy, mapN.xy)));');
-}
-// Rooms behind the windows (after Slop New York's ray-marched apartment interiors): each window cell looks into a box
-// room, its back wall, side walls, floor and ceiling found by intersecting the view ray with the room's planes in the
-// wall's own frame. By day the rooms are dim; after dark a share of them light up warm (a few cool), more in the
-// shops on the ground floor.
-const roomDayU = { value: 0.3 };
-const ROOM_GLSL = `
-uniform float night;
-uniform float roomDay;
-float roomHash(vec3 p) { p = fract(p * vec3(0.1031, 0.1030, 0.0973)); p += dot(p, p.yxz + 33.33); return fract((p.x + p.y) * p.z); }
-vec3 roomLight(vec2 uv, vec3 seed, bool shop) {
-  vec3 pos = -vViewPosition;
-  vec3 n = normalize(cross(dFdx(pos), dFdy(pos)));
-  vec3 dp1 = dFdx(pos), dp2 = dFdy(pos);
-  vec2 du1 = dFdx(uv), du2 = dFdy(uv);
-  vec3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
-  vec3 T = dp2perp * du1.x + dp1perp * du2.x, B = dp2perp * du1.y + dp1perp * du2.y;
-  float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
-  T *= invmax; B *= invmax;
-  // The view ray in the wall's frame (u along, v up, w out of the wall), scaled to cells (one per bay and floor).
-  vec3 V = normalize(vViewPosition);
-  vec3 dir = -vec3(dot(V, T) / max(length(T), 1e-4), dot(V, B) / max(length(B), 1e-4), dot(V, n));
-  dir.z = min(dir.z, -0.05);
-  vec2 cell = floor(uv), f = fract(uv);
-  float depth = 0.9;
-  vec3 o = vec3(f, 0.0);
-  vec3 tx = (step(0.0, dir) - o) / dir;          // distance to the far plane on each axis
-  tx.z = -depth / dir.z;
-  float t = min(min(tx.x, tx.y), tx.z);
-  vec3 hit = o + dir * t;
-  float h = roomHash(vec3(cell, 0.0) + seed * 97.0);
-  float h2 = roomHash(vec3(cell, 5.0) + seed * 53.0);
-  vec3 wall = mix(vec3(0.78, 0.72, 0.62), vec3(0.62, 0.68, 0.72), step(0.6, h2));
-  vec3 col;
-  if (t == tx.z) col = wall * (0.75 + 0.25 * step(0.35, fract(hit.x * 3.0 + h2)) * step(hit.y, 0.55));   // back wall, a picture or a shelf
-  else if (t == tx.y) col = dir.y < 0.0 ? vec3(0.35, 0.26, 0.18) * (0.8 + 0.2 * h) : vec3(0.92);           // floor or ceiling
-  else col = wall * 0.82;                                                                                 // side walls
-  float back = clamp(-hit.z / depth, 0.0, 1.0);
-  col *= 1.0 - back * 0.35;
-  float lit = step(h, mix(0.0, shop ? 0.85 : 0.42, night));
-  vec3 lamp = mix(vec3(1.0, 0.7, 0.42), vec3(0.72, 0.84, 1.0), step(0.86, h2));
-  float pool = 1.0 - 0.4 * length(hit.xy - vec2(0.5, 0.9));                  // the ceiling light's falloff
-  return col * (roomDay * (0.55 + 0.45 * (1.0 - back)) + lit * lamp * pool * (shop ? 2.6 : 1.8));
-}`;
+//
+// Rooms behind the windows (after Slop New York's apartment interiors): each window cell looks into a box room, its
+// back wall, side walls, floor and ceiling found by intersecting the view ray with the room's planes in the wall's own
+// frame (u along the wall, v up, w out of it). By day the rooms are dim; after dark a share of them light up warm (a
+// few cool), more in the shops on the ground floor.
+const roomHash = (p) => {
+  const q = fract(p.mul(vec3(0.1031, 0.103, 0.0973))).toVar();
+  q.addAssign(dot(q, q.yxz.add(33.33)));
+  return fract(q.x.add(q.y).mul(q.z));
+};
+const roomLight = Fn(([cellUV, seed, shop]) => {
+  const N0 = normalize(normalWorld);
+  const V = normalize(cameraPosition.sub(positionWorld));
+  const N = select(dot(N0, V).lessThan(0), N0.negate(), N0);
+  const T0 = cross(vec3(0, 1, 0), N);
+  const T = T0.div(max(length(T0), 1e-4)).toVar();
+  // Which way the texture runs along the wall (the same whichever way the screen's y runs).
+  const su = dot(dFdx(positionWorld), T).mul(dFdx(cellUV.x)).add(dot(dFdy(positionWorld), T).mul(dFdy(cellUV.x)));
+  T.mulAssign(select(su.lessThan(0), -1, 1));
+  // The view ray into the room in cells across and up (bays ~2.6 m, floors ~3.4 m) and metres deep.
+  const dir = vec3(dot(V, T).negate().div(2.6), V.y.negate().div(3.4), min(dot(V, N).negate(), -0.05)).toVar();
+  const depth = 3.2;
+  const cell = floor(cellUV), f = fract(cellUV);
+  const o = vec3(f, 0.0);
+  const tx = vec3(step(0.0, dir.x).sub(o.x).div(dir.x), step(0.0, dir.y).sub(o.y).div(dir.y), float(-depth).div(dir.z));
+  const t = min(min(tx.x, tx.y), tx.z);
+  const hit = o.add(dir.mul(t));
+  const h = roomHash(vec3(cell, 0.0).add(seed.mul(97.0)));
+  const h2 = roomHash(vec3(cell, 5.0).add(seed.mul(53.0)));
+  const wallCol = mix(vec3(0.78, 0.72, 0.62), vec3(0.62, 0.68, 0.72), step(0.6, h2));
+  const backWall = wallCol.mul(step(0.35, fract(hit.x.mul(3.0).add(h2))).mul(step(hit.y, 0.55)).mul(0.25).add(0.75));
+  const floorCeil = select(dir.y.lessThan(0), vec3(0.35, 0.26, 0.18).mul(h.mul(0.2).add(0.8)), vec3(0.92));
+  const col = select(t.equal(tx.z), backWall, select(t.equal(tx.y), floorCeil, wallCol.mul(0.82)));
+  const back = tclamp(hit.z.negate().div(depth), 0.0, 1.0);
+  const lit = step(h, mix(0.0, mix(0.42, 0.85, shop), nightU));
+  const lamp = mix(vec3(1.0, 0.7, 0.42), vec3(0.72, 0.84, 1.0), step(0.86, h2));
+  const pool = float(1.0).sub(length(hit.xy.sub(vec2(0.5, 0.9))).mul(0.4));
+  return col.mul(back.mul(-0.35).add(1.0)).mul(roomDayU.mul(float(1).sub(back).mul(0.45).add(0.55)).add(lit.mul(lamp).mul(pool).mul(mix(1.8, 2.6, shop))));
+});
 function makeCityMat(extra = {}) {
-  const mat = new THREE.MeshStandardMaterial({
-    vertexColors: true, roughness: 0.92, metalness: 0, flatShading: true, side: THREE.DoubleSide,
-    map: whitePixel, normalMap: whitePixel, normalScale: new THREE.Vector2(1.4, 1.4), ...extra,
-  });
-  mat.onBeforeCompile = cityShader;
+  const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.92, metalness: 0, side: THREE.DoubleSide, ...extra });
+  const la = attribute('la', 'vec2');                    // texture layer, sky occlusion (bytes, normalised)
+  const layer = round(la.x.mul(255));
+  const fUV = uv();
+  const tex = facadeColorTex.sample(fUV).depth(layer);
+  const nrm = facadeNormalTex.sample(fUV).depth(layer);
+  const trim = smoothstep(0.2, 0.45, nrm.b), glass = smoothstep(0.7, 0.9, nrm.b);
+  const windowed = glass.mul(step(layer, 5.5));
+  mat.colorNode = tex.rgb.mul(mix(vertexColor().rgb, vec3(1), trim)).mul(la.y).mul(windowed.mul(-0.7).add(1));
+  mat.roughnessNode = mix(materialRoughness, 0.06, glass);
+  mat.metalnessNode = mix(0.0, 0.35, glass);
+  const nxy = nrm.rg.mul(2).sub(1);
+  const nz = max(float(1).sub(dot(nxy, nxy)), 0).sqrt();
+  mat.normalNode = normalMap(vec3(nrm.rg, nz.mul(0.5).add(0.5)), vec2(1.4));
+  const shop = step(3.5, layer).mul(step(layer, 4.5));
+  mat.emissiveNode = windowed.mul(roomLight(fUV, vertexColor().rgb.add(layer.mul(0.137)), shop));
   return mat;
 }
 const cityMat = makeCityMat();
@@ -980,7 +829,7 @@ class Geo {
     this.uv.push(ua[0], ua[1], ub[0], ub[1], uc[0], uc[1]);
     for (const ao of [aa, ab, ac]) {
       this.la.push(layer, Math.round(ao * 255));
-      this.c.push(Math.round(col.r * 255), Math.round(col.g * 255), Math.round(col.b * 255));
+      this.c.push(Math.round(col.r * 255), Math.round(col.g * 255), Math.round(col.b * 255), 255);
     }
   }
   /** Corners counter-clockwise; one uv and one occlusion value per corner. */
@@ -994,8 +843,9 @@ class Geo {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.p, 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2));
-    g.setAttribute('la', new THREE.BufferAttribute(new Uint8Array(this.la), 2));
-    g.setAttribute('color', new THREE.BufferAttribute(new Uint8Array(this.c), 3, true));
+    g.setAttribute('la', new THREE.BufferAttribute(new Uint8Array(this.la), 2, true));
+    g.setAttribute('color', new THREE.BufferAttribute(new Uint8Array(this.c), 4, true));
+    g.computeVertexNormals();                    // flat: every triangle has its own corners
     g.computeBoundingSphere();
     const m = new THREE.Mesh(g, mat);
     m.castShadow = m.receiveShadow = !LOW_POWER;
@@ -1934,13 +1784,15 @@ function updatePlacesCount() {
 updatePlacesCount();
 
 /* -------------------------------- The car -------------------------------- */
-// Slop New York's lofted sedan (nyc/cars.js), facing +z, in the paint you pick: glass, lamps, grille, shut lines
-// and alloys are painted on by its material. The body rolls and pitches; front wheels steer, all four roll.
+// Slop New York's lofted sedan (nyc/actor-models.js), facing +z, in the paint you pick: glass, lamps, grille, shut
+// lines and alloys are painted on by its material, one per paint. The body rolls and pitches; front wheels steer,
+// all four roll.
 const PAINTS = ['#e4574b', '#f2b541', '#3f7fd0', '#3fa35b', '#f4f1ea', '#8a5cc9', '#2f3b4c', '#f08a3c'];
 let paintIdx = clamp(store.get('paint', 0), 0, PAINTS.length - 1);
 const PLAYER_SPEC = BODY_SPECS.sedan;
-const carMat = createCarMaterial(PLAYER_SPEC, { night: nightU });
-const paint = { color: carMat.userData.paint.set(PAINTS[paintIdx]) };
+const playerMat = (i) => createLoftedCarMaterial(PLAYER_SPEC, new THREE.Color(PAINTS[i]).getHex());
+let carMat = playerMat(paintIdx);
+const carMeshes = [];
 
 const car = new THREE.Group();
 const carBody = new THREE.Group();           // rolls and pitches; the wheels stay planted
@@ -1948,6 +1800,7 @@ car.add(carBody);
 {
   const body = new THREE.Mesh(buildCarGeometry(PLAYER_SPEC, false), carMat);
   body.castShadow = true;
+  carMeshes.push(body);
   carBody.add(body);
 }
 const WHEEL_R = PLAYER_SPEC.wheelRadius, WHEELBASE = 2.6;
@@ -1958,6 +1811,7 @@ for (const side of [1, -1]) for (const z of [PLAYER_SPEC.wheelZ, -PLAYER_SPEC.wh
   const spin = new THREE.Group();
   const wheel = new THREE.Mesh(buildSteerableWheelGeo(PLAYER_SPEC, side), carMat);
   wheel.castShadow = true;
+  carMeshes.push(wheel);
   spin.add(wheel);
   pivot.add(spin);
   car.add(pivot);
@@ -1985,7 +1839,8 @@ scene.add(car);
 
 function setPaint(i) {
   paintIdx = i;
-  paint.color.set(PAINTS[i]);
+  carMat = playerMat(i);
+  for (const m of carMeshes) m.material = carMat;
   store.set('paint', i);
   document.querySelectorAll('.swatch').forEach((b, k) => b.setAttribute('aria-pressed', String(k === i)));
 }
@@ -2046,10 +1901,15 @@ const puffPos = new Float32Array(PUFFS * 3).fill(-999);
 const puffCol = new Float32Array(PUFFS * 3);
 const puffVel = new Float32Array(PUFFS * 3);
 const puffLife = new Float32Array(PUFFS);
-const puffGeo = new THREE.BufferGeometry();
-puffGeo.setAttribute('position', new THREE.BufferAttribute(puffPos, 3));
-puffGeo.setAttribute('color', new THREE.BufferAttribute(puffCol, 3));
-const puffs = new THREE.Points(puffGeo, new THREE.PointsMaterial({ size: 1.4, map: puffTex, vertexColors: true, transparent: true, opacity: 0.7, depthWrite: false }));
+// One instanced draw of camera-facing sprites, a position and a colour each.
+const puffPosAttr = new THREE.InstancedBufferAttribute(puffPos, 3), puffColAttr = new THREE.InstancedBufferAttribute(puffCol, 3);
+const puffGeo = { attributes: { position: puffPosAttr, color: puffColAttr } };
+const puffMat = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false });
+puffMat.positionNode = instancedBufferAttribute(puffPosAttr);
+puffMat.colorNode = vec4(instancedBufferAttribute(puffColAttr), texture(puffTex).a.mul(0.7));
+puffMat.scaleNode = float(1.4);
+const puffs = new THREE.Sprite(puffMat);
+puffs.count = PUFFS;
 puffs.frustumCulled = false;
 scene.add(puffs);
 let puffCursor = 0;
@@ -2209,7 +2069,7 @@ function buildTraffic() {
     .map(c => new THREE.Color(c));
   trafficSets = TRAFFIC_KINDS.map(([kind]) => {
     const spec = BODY_SPECS[kind];
-    const mat = createCarMaterial(spec, { instanced: true, night: nightU });
+    const mat = createLoftedCarMaterial(spec);
     const lod = [buildCarGeometry(spec, true), buildCarProxyGeometry(spec)].map((geo) => {
       geo.setAttribute('paintColor', new THREE.InstancedBufferAttribute(new Float32Array(count * 3), 3));
       geo.setAttribute('carState', new THREE.InstancedBufferAttribute(new Float32Array(count * 4), 4));
@@ -2583,7 +2443,7 @@ function poseCar(dt) {
     w.spin.rotation.x += P.fwd * dt / WHEEL_R;
     if (w.front) w.pivot.rotation.y = -P.steer;
   }
-  carMat.userData.carState.x = input.brake > 0 && Math.abs(P.fwd) > 0.5 ? 1 : 0;
+  carMat.userData.carState.value.x = input.brake > 0 && Math.abs(P.fwd) > 0.5 ? 1 : 0;
 }
 
 /* -------------------------------- Camera -------------------------------- */
@@ -3219,9 +3079,6 @@ loadCity().catch((err) => {
 function resize() {
   const w = host.clientWidth, h = host.clientHeight;
   renderer.setSize(w, h, false);
-  composer.setPixelRatio(pixelRatio);
-  composer.setSize(w, h);
-  gradePass.uniforms.aspect.value = w / h;
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
@@ -3267,17 +3124,14 @@ function loop(now = performance.now()) {
     p.g.position.y = groundH(p.lm.x, p.lm.z);
     p.pin.position.y = 48 + Math.sin(performance.now() * 0.0015 + p.lm.x) * 2;
   }
-  // Sun, its shadow box and the shadow catcher follow the car.
-  sun.target.position.set(player.x, player.y, player.z);
-  sun.position.copy(sun.target.position).add(SUN_OFFSET);
+  // The sun's shadow cascades follow the camera; the shadow catcher on the map follows the car.
+  lighting.update(camera.position);
   fitShadowCatcher(Math.round(player.x), Math.round(player.z));
-  sky.position.copy(camera.position);
   if (indexLoaded) stepDetail();
-  trees.timeU.value = now / 1000;
   trees.update(camera.position);
   if (started && frame % 2 === 0) { drawMini(); updateHud(); }
   if (started) watchPerf(dt);
-  composer.render();
+  renderPipeline.render();
 }
 applyTime(timeIdx);
 loop();
@@ -3286,8 +3140,8 @@ if (location.hash === '#debug') {
   window.__dbg = {
     player, input, camState, keys, traffic, tPos, placeOnRoad, surfaceAt, deckAt, groundH, bridges, cityXZ, scene, shadowCatcher, chunks, readyChunks, MAP, renderer, camera, stepDetail, stepStreaming,
     /** Render one frame from a given camera spot (screenshots while frames are paused). */
-    view(x, y, z, lx, ly, lz) { dbgCam = true; camera.position.set(x, y, z); camera.lookAt(lx, ly, lz); sky.position.copy(camera.position); for (let i = 0; i < 40; i++) { stepStreaming(0.3); stepDetail(); } trees.update(camera.position); composer.render(); },
-    applyTime, THREE, TIMES, hemi, sun, roadMat, cityMat, composer, people, crowd,
+    view(x, y, z, lx, ly, lz) { dbgCam = true; camera.position.set(x, y, z); camera.lookAt(lx, ly, lz); for (let i = 0; i < 40; i++) { stepStreaming(0.3); stepDetail(); } trees.update(camera.position); renderPipeline.render(); },
+    applyTime, THREE, TIMES, hemi, sun, roadMat, cityMat, renderPipeline, people, crowd, lighting,
     sim(sec, held = []) {
       keys.clear();
       held.forEach(k => keys.add(k));

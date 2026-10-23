@@ -1,11 +1,42 @@
-// Skinned, procedurally animated people from Slop New York (https://github.com/mrdoob/slop-newyork, MIT, © 2026
-// Mr.doob: see LICENSE here). The skeleton, the lofted body (sections 1-2) and PersonRig's planted-footstep walk
-// (section 5) are NYC's own, unchanged but for the imports. The material and the crowd (sections 3-4) are a WebGL /
-// GLSL port: each person's bone transforms go in a float texture, one row per person, that the vertex shader skins
-// from, in place of NYC's WebGPU storage buffer.
-import * as THREE from 'three';
+import * as THREE from 'three/webgpu';
+import {
+  Fn,
+  float,
+  int,
+  vec2,
+  vec3,
+  color,
+  attribute,
+  instanceIndex,
+  attributeArray,
+  normalLocal,
+  varying,
+  cross,
+  normalize,
+  sin,
+  abs,
+  fract,
+  max,
+  clamp,
+  mix,
+  step,
+  smoothstep
+} from 'three/tsl';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
+// js/pedestrians.js
+// Skinned, procedurally animated New Yorkers: the sidewalk crowds (traffic.js), the player's pedestrian and the
+// cyclist's rider (controllers.js).
+// - One continuous lofted body (torso & neck, trouser legs, sleeves, hands, head, hair, shoes) skinned to a 15-bone
+//   skeleton, with bind-pose morphs for build (girth), female proportions and hair volume & length; a near and a far
+//   level of detail.
+// - A whole crowd is one instanced draw per level of detail: every person's bone transforms (quaternion, translation &
+//   scale) live in a storage buffer the vertex stage skins from, and a per-person seed dresses them (TSL material).
+// - PersonRig walks a body along whatever path its owner moves it on: footsteps are planted in the world (heel strike,
+//   foot flat, heel-off & toe-off rolling over a toe joint), so feet never slide; two-bone IK bends hips & knees to
+//   reach them, the pelvis rides as high as the planted legs allow (the inverted pendulum's bob), and the pelvis
+//   rotation & sway, the chest's counter-rotation and the arm swing all follow the feet. It turns on the spot, stops
+//   with its feet together, steps up & down curbs, runs, jumps, and rides a bicycle (feet on the pedals).
 
 // ============================================================================
 // 1. SKELETON
@@ -698,6 +729,210 @@ const LEG_COLORS_F = [0x1c1c22, 0x2f4a6e, 0x46413b, 0xcfc8bb, 0x5a2a2e];
 const SKIN_COLORS = [0xc68863, 0xa96f4c, 0x8a5535, 0x6b3d24, 0xd9a077];
 const HAIR_COLORS = [0x1a1512, 0x3a2a1a, 0x584022, 0x6e6862, 0x2a2624, 0x8f6d43, 0x5e3020];
 
+// Branchless TSL palette selector from an array of hex colors and a [0..1) hash value
+function pickColorFromPalette(hexArray, tNode) {
+  const n = hexArray.length;
+  const scaled = tNode.mul(n);
+  let acc = color(hexArray[0]);
+  for (let i = 1; i < n; i++) {
+    acc = mix(acc, color(hexArray[i]), step(float(i), scaled));
+  }
+  return acc;
+}
+
+// v rotated by unit quaternion q
+const qrot = (q, v) => v.add(cross(q.xyz, cross(q.xyz, v).add(v.mul(q.w))).mul(2.0));
+
+/**
+ * Material for one crowd mesh. `pose` is its storage buffer (STRIDE vec4s per instance). The vertex stage morphs the
+ * bind pose (girth, female, hair) and skins it with two bones; the fragment stage dresses the person from their seed:
+ * skin tone, hair & hairline, eyes, brows & mouth, a tailored jacket (lapels, shirt V) or casual coat (zip, hem,
+ * collar), cuffs, trousers, sneakers or leather shoes with soles & laces.
+ */
+function createPersonMaterial(pose) {
+  const mat = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
+  const base = int(instanceIndex).mul(STRIDE);
+  const info = pose.element(base.add(STRIDE - 1)); // seed, female, girth, hair
+
+  mat.positionNode = Fn(() => {
+    const skin = attribute('skin', 'vec4');
+    const extra = attribute('extra', 'vec3');
+    // hair volume on the shell (part 6), hair length on the long hair (part 7)
+    const hairAmount = mix(clamp(info.w.mul(2.0), 0.0, 1.0), clamp(info.w.mul(2.0).sub(1.0), 0.0, 1.0), step(PART.LONG_HAIR - 0.5, skin.w));
+    const p = attribute('position', 'vec3')
+      .add(vec3(extra.x, 0.0, extra.y).mul(info.z.sub(1.0)))
+      .add(attribute('femaleDelta', 'vec3').mul(info.y))
+      .add(attribute('hairDelta', 'vec3').mul(hairAmount));
+    const n = attribute('normal', 'vec3');
+    const w = skin.z;
+    const ia = base.add(int(skin.x).mul(2));
+    const ib = base.add(int(skin.y).mul(2));
+    const qa = pose.element(ia);
+    const ta = pose.element(ia.add(1));
+    const qb = pose.element(ib);
+    const tb = pose.element(ib.add(1));
+    normalLocal.assign(normalize(mix(qrot(qa, n), qrot(qb, n), w)));
+    return mix(qrot(qa, p).mul(ta.w).add(ta.xyz), qrot(qb, p).mul(tb.w).add(tb.xyz), w);
+  })();
+
+  const vInfo = varying(info, 'vPersonInfo');
+  const isPart = (partId, id) => step(abs(partId.sub(id)), 0.25);
+  const lane = (salt) => fract(sin(vInfo.x.add(salt).mul(12.9898)).mul(43758.5453));
+  const partOf = () => attribute('skin', 'vec4').w;
+
+  mat.colorNode = Fn(() => {
+    const partId = partOf();
+    const female = vInfo.y;
+    const q = attribute('position', 'vec3').toVar();
+    const along = attribute('extra', 'vec3').z;
+
+    const skinCol = pickColorFromPalette(SKIN_COLORS, lane(17.0)).toVar();
+    const hairCol = pickColorFromPalette(HAIR_COLORS, lane(3.0)).toVar();
+    const coatCol = mix(pickColorFromPalette(COAT_COLORS, lane(29.0)), pickColorFromPalette(COAT_COLORS_F, lane(29.0)), female).toVar();
+    const shirtCol = pickColorFromPalette(SHIRT_COLORS, lane(71.0)).toVar();
+    const legsCol = mix(pickColorFromPalette(LEG_COLORS, lane(47.0)), pickColorFromPalette(LEG_COLORS_F, lane(47.0)), female);
+
+    // Head: skin, hairline (none for the bald), eyes, brows, lips
+    const hd = normalize(vec2(q.x, q.z.add(0.01)));
+    const bald = step(lane(41.0), 0.08).mul(float(1.0).sub(female));
+    const hairline = hd.y.mul(0.055).add(1.62).sub(hd.x.mul(hd.x).sub(hd.y.mul(hd.y)).mul(0.005)).add(bald.mul(0.3));
+    const hairMask = smoothstep(hairline.sub(0.004), hairline.add(0.004), q.y);
+    const front = smoothstep(0.06, 0.08, q.z);
+    const eyeX = abs(abs(q.x).sub(0.031));
+    const eyes = smoothstep(0.011, 0.006, eyeX).mul(smoothstep(0.0055, 0.002, abs(q.y.sub(1.627)))).mul(front);
+    const brows = smoothstep(0.016, 0.01, eyeX).mul(smoothstep(0.0035, 0.0012, abs(q.y.sub(1.646)))).mul(front);
+    const mouth = smoothstep(0.022, 0.014, abs(q.x)).mul(smoothstep(0.0045, 0.0015, abs(q.y.sub(1.549)))).mul(front);
+    const faceCol = mix(
+      skinCol.mul(float(1.0).sub(eyes.mul(0.7)).sub(brows.mul(0.45))),
+      skinCol.mul(color(0xb06a5c)).mul(1.15),
+      mouth.mul(0.7)
+    );
+    const headCol = mix(faceCol, hairCol, hairMask);
+    const hairStrands = hairCol.mul(sin(q.x.mul(170.0).add(q.z.mul(130.0))).mul(0.06).add(0.97));
+    const hairPartCol = mix(hairStrands, skinCol, bald.mul(step(q.y, 1.755)));
+
+    // Torso: collar & neck, tailored jacket (lapels, shirt V) or casual coat (zip, collar band), hem, trousers below
+    const tailored = step(0.42, lane(89.0));
+    const hemY = mix(mix(0.955, 1.0, lane(61.0)), mix(0.88, 1.0, lane(61.0)), female);
+    const chestFront = smoothstep(0.035, 0.075, q.z);
+    const opening = q.y.sub(1.33).mul(0.42);
+    const shirtV = smoothstep(1.33, 1.35, q.y).mul(smoothstep(0.004, 0.0, abs(q.x).sub(opening))).mul(chestFront).mul(tailored);
+    const lapel = smoothstep(0.024, 0.009, abs(abs(q.x).sub(opening)))
+      .mul(smoothstep(1.32, 1.37, q.y))
+      .mul(chestFront)
+      .mul(tailored)
+      .mul(float(1.0).sub(shirtV));
+    const zip = smoothstep(0.006, 0.0025, abs(q.x)).mul(chestFront).mul(float(1.0).sub(tailored));
+    const collarBand = smoothstep(1.455, 1.48, q.y).mul(float(1.0).sub(tailored));
+    const neckLine = mix(1.5, 1.49, tailored);
+    const neck = smoothstep(neckLine.sub(0.004), neckLine.add(0.004), q.y);
+    const hem = smoothstep(hemY.sub(0.004), hemY.add(0.004), q.y);
+    const hemShade = smoothstep(hemY.add(0.035), hemY, q.y).mul(0.12);
+    const jacketCol = mix(
+      coatCol.mul(float(1.0).sub(lapel.mul(0.25)).sub(zip.mul(0.4)).sub(collarBand.mul(0.15)).sub(hemShade)),
+      shirtCol,
+      shirtV
+    );
+    const torsoCol = mix(mix(legsCol, jacketCol, hem), skinCol, neck);
+
+    // Sleeves: cuffs (shirt cuff under a tailored jacket)
+    const cuff = smoothstep(0.93, 0.96, along);
+    const sleeveCol = mix(coatCol, mix(coatCol.mul(0.72), shirtCol, tailored), cuff);
+
+    // Trousers: subtle front crease
+    const crease = smoothstep(0.004, 0.0, abs(abs(q.x).sub(HIP_X))).mul(step(0.0, q.z)).mul(0.08);
+    const trouserCol = legsCol.mul(float(1.0).sub(crease));
+
+    // Shoes: sneakers or leather, soles, laces over the instep
+    const sneaker = step(0.4, lane(5.0));
+    const leatherCol = mix(color(0x201e1c), color(0x4a3524), lane(23.0));
+    const sneakerCol = mix(color(0x252b32), color(0xc8c3b8), step(0.55, lane(31.0)));
+    const upperCol = mix(leatherCol, sneakerCol, sneaker);
+    const sole = smoothstep(0.024, 0.016, q.y);
+    const soleCol = mix(color(0x191816), color(0xd5d1c8), sneaker);
+    const laceCoord = q.z.mul(80.0);
+    const laces = smoothstep(0.6, 0.75, fract(laceCoord))
+      .mul(step(abs(abs(q.x).sub(HIP_X)), 0.016))
+      .mul(step(0.0, q.z))
+      .mul(step(q.z, 0.09))
+      .mul(step(0.075, q.y))
+      .mul(sneaker);
+    const shoeCol = mix(mix(upperCol, soleCol, sole), color(0xb8b4aa), laces.mul(0.6));
+
+    return mix(
+      mix(
+        mix(
+          mix(
+            mix(mix(torsoCol, trouserCol, isPart(partId, PART.LEG)), shoeCol, isPart(partId, PART.SHOE)),
+            sleeveCol,
+            isPart(partId, PART.ARM)
+          ),
+          skinCol,
+          isPart(partId, PART.HAND)
+        ),
+        headCol,
+        isPart(partId, PART.HEAD)
+      ),
+      hairPartCol,
+      step(PART.HAIR - 0.5, partId)
+    );
+  })();
+
+  mat.roughnessNode = Fn(() => {
+    const partId = partOf();
+    const skin = max(isPart(partId, PART.HAND), isPart(partId, PART.HEAD));
+    const leather = isPart(partId, PART.SHOE).mul(step(lane(5.0), 0.4));
+    return mix(mix(mix(float(0.86), float(0.55), skin), float(0.74), step(PART.HAIR - 0.5, partId)), float(0.38), leather);
+  })();
+
+  return mat;
+}
+
+// ============================================================================
+// 4. CROWD: ONE INSTANCED, SKINNED DRAW PER LEVEL OF DETAIL
+// ============================================================================
+class PersonCrowd {
+  /**
+   * @param {number} maxCount - most people drawn at once
+   * @param {{ farDistance?: number, castShadow?: boolean }} options - beyond farDistance (m) people use the far LOD
+   */
+  constructor(maxCount, { farDistance = 34, castShadow = true } = {}) {
+    this.farDistance = farDistance;
+    this.lods = [1, 0].map((detail) => {
+      const pose = attributeArray(maxCount * STRIDE, 'vec4').toReadOnly();
+      const mesh = new THREE.Mesh(buildPersonGeometry(detail), createPersonMaterial(pose));
+      mesh.name = detail ? 'PeopleNear' : 'PeopleFar';
+      mesh.count = 1; // one (degenerate) person until the first frame, so the pipelines compile up front
+      mesh.frustumCulled = false;
+      mesh.castShadow = castShadow;
+      mesh.receiveShadow = true;
+      return { pose, mesh, count: 0, max: maxCount };
+    });
+    this.meshes = this.lods.map((l) => l.mesh);
+  }
+
+  begin() {
+    for (const l of this.lods) l.count = 0;
+  }
+
+  add(rig, distance = 0) {
+    const l = this.lods[distance > this.farDistance ? 1 : 0];
+    if (l.count >= l.max) return;
+    l.pose.value.array.set(rig.pose, l.count * STRIDE * 4);
+    l.count++;
+  }
+
+  end() {
+    for (const l of this.lods) {
+      l.mesh.count = l.count;
+      if (l.count === 0) continue;
+      const attr = l.pose.value;
+      attr.clearUpdateRanges();
+      attr.addUpdateRange(0, l.count * STRIDE * 4);
+      attr.needsUpdate = true;
+    }
+  }
+}
 
 // ============================================================================
 // 5. PERSON RIG: PLANTED FOOTSTEPS, TWO-BONE IK & A GAIT THAT FOLLOWS THE FEET
@@ -1260,187 +1495,4 @@ class PersonRig {
   }
 }
 
-
-// ============================================================================
-// 3-4. MATERIAL AND CROWD (WebGL port): bone transforms in a float texture, STRIDE texels per person's row.
-// ============================================================================
-const glc = (h) => { const c = new THREE.Color(h); return `vec3(${c.r.toFixed(5)}, ${c.g.toFixed(5)}, ${c.b.toFixed(5)})`; };
-// Branchless palette pick from a [0..1) hash, as GLSL source.
-function palette(hexArray, t) {
-  let acc = glc(hexArray[0]);
-  for (let i = 1; i < hexArray.length; i++) acc = `mix(${acc}, ${glc(hexArray[i])}, step(${i}.0, ${t} * ${hexArray.length}.0))`;
-  return acc;
-}
-
-function createPersonMaterial(poseTex) {
-  const mat = new THREE.MeshStandardMaterial({ metalness: 0, roughness: 0.8 });
-  const fP = (v) => (Number.isInteger(v) ? v + '.0' : String(v));
-  mat.onBeforeCompile = (sh) => {
-    sh.uniforms.poseTex = { value: poseTex };
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', `#include <common>
-        uniform highp sampler2D poseTex;
-        attribute vec4 skin;
-        attribute vec3 extra;
-        attribute vec3 femaleDelta;
-        attribute vec3 hairDelta;
-        varying vec4 vPersonInfo;
-        varying vec3 vPersonQ;
-        varying float vPersonAlong;
-        varying float vPersonPart;
-        vec4 pose(int i) { return texelFetch(poseTex, ivec2(i, gl_InstanceID), 0); }
-        vec3 qrot(vec4 q, vec3 v) { return v + cross(q.xyz, cross(q.xyz, v) + v * q.w) * 2.0; }`)
-      .replace('#include <beginnormal_vertex>', `
-        vec4 info = pose(${STRIDE - 1});
-        // Hair volume on the shell, hair length on the long hair; build and female proportions on the body.
-        float hairAmount = mix(clamp(info.w * 2.0, 0.0, 1.0), clamp(info.w * 2.0 - 1.0, 0.0, 1.0), step(${fP(PART.LONG_HAIR - 0.5)}, skin.w));
-        vec3 bindP = position + vec3(extra.x, 0.0, extra.y) * (info.z - 1.0) + femaleDelta * info.y + hairDelta * hairAmount;
-        int ia = int(skin.x) * 2, ib = int(skin.y) * 2;
-        vec4 qa = pose(ia), ta = pose(ia + 1), qb = pose(ib), tb = pose(ib + 1);
-        vec3 objectNormal = normalize(mix(qrot(qa, normal), qrot(qb, normal), skin.z));
-        vec3 skinned = mix(qrot(qa, bindP) * ta.w + ta.xyz, qrot(qb, bindP) * tb.w + tb.xyz, skin.z);
-        vPersonInfo = info; vPersonQ = position; vPersonAlong = extra.z; vPersonPart = skin.w;
-        #ifdef USE_TANGENT
-          vec3 objectTangent = vec3(tangent.xyz);
-        #endif`)
-      .replace('#include <begin_vertex>', 'vec3 transformed = skinned;');
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', `#include <common>
-        varying vec4 vPersonInfo;
-        varying vec3 vPersonQ;
-        varying float vPersonAlong;
-        varying float vPersonPart;
-        float isP(float id, float want) { return step(abs(id - want), 0.25); }
-        float lane(float salt) { return fract(sin((vPersonInfo.x + salt) * 12.9898) * 43758.5453); }`)
-      .replace('#include <map_fragment>', `
-        float partId = vPersonPart, female = vPersonInfo.y;
-        vec3 q = vPersonQ;
-        float along = vPersonAlong;
-        vec3 skinCol = ${palette(SKIN_COLORS, 'lane(17.0)')};
-        vec3 hairCol = ${palette(HAIR_COLORS, 'lane(3.0)')};
-        vec3 coatCol = mix(${palette(COAT_COLORS, 'lane(29.0)')}, ${palette(COAT_COLORS_F, 'lane(29.0)')}, female);
-        vec3 shirtCol = ${palette(SHIRT_COLORS, 'lane(71.0)')};
-        vec3 legsCol = mix(${palette(LEG_COLORS, 'lane(47.0)')}, ${palette(LEG_COLORS_F, 'lane(47.0)')}, female);
-        // Head: skin, hairline (none for the bald), eyes, brows, lips.
-        vec2 hd = normalize(vec2(q.x, q.z + 0.01));
-        float bald = step(lane(41.0), 0.08) * (1.0 - female);
-        float hairline = hd.y * 0.055 + 1.62 - (hd.x * hd.x - hd.y * hd.y) * 0.005 + bald * 0.3;
-        float hairMask = smoothstep(hairline - 0.004, hairline + 0.004, q.y);
-        float faceFront = smoothstep(0.06, 0.08, q.z);
-        float eyeX = abs(abs(q.x) - 0.031);
-        float eyes = smoothstep(0.011, 0.006, eyeX) * smoothstep(0.0055, 0.002, abs(q.y - 1.627)) * faceFront;
-        float brows = smoothstep(0.016, 0.01, eyeX) * smoothstep(0.0035, 0.0012, abs(q.y - 1.646)) * faceFront;
-        float mouth = smoothstep(0.022, 0.014, abs(q.x)) * smoothstep(0.0045, 0.0015, abs(q.y - 1.549)) * faceFront;
-        vec3 faceCol = mix(skinCol * (1.0 - eyes * 0.7 - brows * 0.45), skinCol * ${glc(0xb06a5c)} * 1.15, mouth * 0.7);
-        vec3 headCol = mix(faceCol, hairCol, hairMask);
-        vec3 hairStrands = hairCol * (sin(q.x * 170.0 + q.z * 130.0) * 0.06 + 0.97);
-        vec3 hairPartCol = mix(hairStrands, skinCol, bald * step(q.y, 1.755));
-        // Torso: tailored jacket (lapels, shirt V) or casual coat (zip, collar band), hem, trousers below.
-        float tailored = step(0.42, lane(89.0));
-        float hemY = mix(mix(0.955, 1.0, lane(61.0)), mix(0.88, 1.0, lane(61.0)), female);
-        float chestFront = smoothstep(0.035, 0.075, q.z);
-        float opening = (q.y - 1.33) * 0.42;
-        float shirtV = smoothstep(1.33, 1.35, q.y) * smoothstep(0.004, 0.0, abs(q.x) - opening) * chestFront * tailored;
-        float lapel = smoothstep(0.024, 0.009, abs(abs(q.x) - opening)) * smoothstep(1.32, 1.37, q.y) * chestFront * tailored * (1.0 - shirtV);
-        float zip = smoothstep(0.006, 0.0025, abs(q.x)) * chestFront * (1.0 - tailored);
-        float collarBand = smoothstep(1.455, 1.48, q.y) * (1.0 - tailored);
-        float neckLine = mix(1.5, 1.49, tailored);
-        float neck = smoothstep(neckLine - 0.004, neckLine + 0.004, q.y);
-        float hem = smoothstep(hemY - 0.004, hemY + 0.004, q.y);
-        float hemShade = smoothstep(hemY + 0.035, hemY, q.y) * 0.12;
-        vec3 jacketCol = mix(coatCol * (1.0 - lapel * 0.25 - zip * 0.4 - collarBand * 0.15 - hemShade), shirtCol, shirtV);
-        vec3 torsoCol = mix(mix(legsCol, jacketCol, hem), skinCol, neck);
-        float cuff = smoothstep(0.93, 0.96, along);
-        vec3 sleeveCol = mix(coatCol, mix(coatCol * 0.72, shirtCol, tailored), cuff);
-        float crease = smoothstep(0.004, 0.0, abs(abs(q.x) - ${fP(HIP_X)})) * step(0.0, q.z) * 0.08;
-        vec3 trouserCol = legsCol * (1.0 - crease);
-        // Shoes: sneakers or leather, soles, laces.
-        float sneaker = step(0.4, lane(5.0));
-        vec3 upperCol = mix(mix(${glc(0x201e1c)}, ${glc(0x4a3524)}, lane(23.0)), mix(${glc(0x252b32)}, ${glc(0xc8c3b8)}, step(0.55, lane(31.0))), sneaker);
-        float sole = smoothstep(0.024, 0.016, q.y);
-        vec3 soleCol = mix(${glc(0x191816)}, ${glc(0xd5d1c8)}, sneaker);
-        float laces = smoothstep(0.6, 0.75, fract(q.z * 80.0)) * step(abs(abs(q.x) - ${fP(HIP_X)}), 0.016) * step(0.0, q.z) * step(q.z, 0.09) * step(0.075, q.y) * sneaker;
-        vec3 shoeCol = mix(mix(upperCol, soleCol, sole), ${glc(0xb8b4aa)}, laces * 0.6);
-        vec3 pc = mix(torsoCol, trouserCol, isP(partId, ${fP(PART.LEG)}));
-        pc = mix(pc, shoeCol, isP(partId, ${fP(PART.SHOE)}));
-        pc = mix(pc, sleeveCol, isP(partId, ${fP(PART.ARM)}));
-        pc = mix(pc, skinCol, isP(partId, ${fP(PART.HAND)}));
-        pc = mix(pc, headCol, isP(partId, ${fP(PART.HEAD)}));
-        pc = mix(pc, hairPartCol, step(${fP(PART.HAIR - 0.5)}, partId));
-        diffuseColor.rgb = pc;`)
-      .replace('#include <roughnessmap_fragment>', `
-        float skinPart = max(isP(partId, ${fP(PART.HAND)}), isP(partId, ${fP(PART.HEAD)}));
-        float leather = isP(partId, ${fP(PART.SHOE)}) * step(lane(5.0), 0.4);
-        float roughnessFactor = mix(mix(mix(0.86, 0.55, skinPart), 0.74, step(${fP(PART.HAIR - 0.5)}, partId)), 0.38, leather);`);
-  };
-  mat.customProgramCacheKey = () => 'nyc-person';
-  return mat;
-}
-
-// The shadow pass skins the same way.
-function createPersonDepthMaterial(poseTex) {
-  const mat = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
-  mat.onBeforeCompile = (sh) => {
-    sh.uniforms.poseTex = { value: poseTex };
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', `#include <common>
-        uniform highp sampler2D poseTex;
-        attribute vec4 skin;
-        attribute vec3 extra;
-        attribute vec3 femaleDelta;
-        attribute vec3 hairDelta;
-        vec4 pose(int i) { return texelFetch(poseTex, ivec2(i, gl_InstanceID), 0); }
-        vec3 qrot(vec4 q, vec3 v) { return v + cross(q.xyz, cross(q.xyz, v) + v * q.w) * 2.0; }`)
-      .replace('#include <begin_vertex>', `
-        vec4 info = pose(${STRIDE - 1});
-        float hairAmount = mix(clamp(info.w * 2.0, 0.0, 1.0), clamp(info.w * 2.0 - 1.0, 0.0, 1.0), step(${PART.LONG_HAIR - 0.5}, skin.w));
-        vec3 bindP = position + vec3(extra.x, 0.0, extra.y) * (info.z - 1.0) + femaleDelta * info.y + hairDelta * hairAmount;
-        int ia = int(skin.x) * 2, ib = int(skin.y) * 2;
-        vec4 qa = pose(ia), ta = pose(ia + 1), qb = pose(ib), tb = pose(ib + 1);
-        vec3 transformed = mix(qrot(qa, bindP) * ta.w + ta.xyz, qrot(qb, bindP) * tb.w + tb.xyz, skin.z);`);
-  };
-  mat.customProgramCacheKey = () => 'nyc-person-depth';
-  return mat;
-}
-
-class PersonCrowd {
-  /** maxCount: most people drawn at once; beyond farDistance (m) people use the far level of detail. */
-  constructor(maxCount, { farDistance = 34, castShadow = true } = {}) {
-    this.farDistance = farDistance;
-    this.lods = [1, 0].map((detail) => {
-      const data = new Float32Array(STRIDE * maxCount * 4);
-      const tex = new THREE.DataTexture(data, STRIDE, maxCount, THREE.RGBAFormat, THREE.FloatType);
-      tex.needsUpdate = true;
-      // Positions come from the pose texture in world space, so every instance matrix stays the identity.
-      const mesh = new THREE.InstancedMesh(buildPersonGeometry(detail), createPersonMaterial(tex), maxCount);
-      mesh.customDepthMaterial = createPersonDepthMaterial(tex);
-      mesh.name = detail ? 'PeopleNear' : 'PeopleFar';
-      mesh.count = 0;
-      mesh.frustumCulled = false;
-      mesh.castShadow = castShadow;
-      mesh.receiveShadow = true;
-      return { data, tex, mesh, count: 0, max: maxCount };
-    });
-    this.meshes = this.lods.map((l) => l.mesh);
-  }
-
-  begin() {
-    for (const l of this.lods) l.count = 0;
-  }
-
-  add(rig, distance = 0) {
-    const l = this.lods[distance > this.farDistance ? 1 : 0];
-    if (l.count >= l.max) return;
-    l.data.set(rig.pose, l.count * STRIDE * 4);
-    l.count++;
-  }
-
-  end() {
-    for (const l of this.lods) {
-      l.mesh.count = l.count;
-      if (l.count) l.tex.needsUpdate = true;
-    }
-  }
-}
-
-export { BONE as PERSON_BONES, buildPersonGeometry, PersonCrowd, PersonRig };
+export { BONE as PERSON_BONES, buildPersonGeometry, createPersonMaterial, PersonCrowd, PersonRig };
