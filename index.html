@@ -112,6 +112,19 @@
     margin-left: 6px; width: 24px; height: 24px; border-radius: 7px; display: inline-grid; place-items: center;
     background: var(--ink); color: #fff; align-self: center;
   }
+  /* Mode bar (after Slop New York's): on foot, car, bicycle, helicopter. */
+  .modebar {
+    position: fixed; left: 50%; bottom: calc(48px + var(--safe-b)); transform: translateX(-50%); z-index: 4;
+    display: flex; gap: 4px; padding: 4px; border-radius: 14px; background: rgba(255,255,255,0.78);
+    box-shadow: 0 4px 18px rgba(18, 48, 71, 0.14); backdrop-filter: blur(8px);
+  }
+  .modebar button {
+    width: 42px; height: 38px; border: 0; border-radius: 10px; background: transparent; color: var(--ink);
+    display: grid; place-items: center; cursor: pointer;
+  }
+  .modebar button:hover { background: rgba(18, 48, 71, 0.07); }
+  .modebar button[aria-pressed="true"] { background: #f2b541; color: #1c1a14; }
+  .is-touch .modebar { bottom: calc(150px + var(--safe-b)); }
   .hintline {
     position: fixed; left: 50%; bottom: calc(18px + var(--safe-b)); transform: translateX(-50%); z-index: 3;
     font-size: 12px; color: rgba(18, 48, 71, 0.75); background: rgba(255,255,255,0.6);
@@ -248,6 +261,12 @@
 
 <div class="minimap" id="minimap" title="Open the city map (M)"><canvas id="mini" width="336" height="336"></canvas></div>
 <div class="speedo"><b id="speed">0</b><span>mph</span><i id="gear">P</i></div>
+<div class="modebar" id="modebar" role="group" aria-label="Get around">
+  <button type="button" data-mode="person" title="On foot (1)" aria-label="On foot"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13" cy="4" r="2"/><path d="m9 21 2-6 3 3v3M7 12l3-4 4 1 3 3M10 8l-1 6"/></svg></button>
+  <button type="button" data-mode="car" title="Car (2)" aria-label="Car"><svg width="20" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 17H3v-5l2-5h11l3 5h2v5h-2M5 12h16"/><circle cx="7.5" cy="17" r="2"/><circle cx="16.5" cy="17" r="2"/></svg></button>
+  <button type="button" data-mode="cyclist" title="Bicycle (3)" aria-label="Bicycle"><svg width="20" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5.5" cy="17" r="3.5"/><circle cx="18.5" cy="17" r="3.5"/><path d="M5.5 17 9 9h6l3.5 8M12 17l-3-8M15 9l-1-3h-2"/></svg></button>
+  <button type="button" data-mode="helicopter" title="Helicopter (4)" aria-label="Helicopter"><svg width="20" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4h18M12 4v4M6 12a5 4 0 0 1 10 0v3H8a2 2 0 0 1-2-2ZM16 12h5M9 15v3M14 15v3M7 18h9"/></svg></button>
+</div>
 <div class="hintline" id="hintline">WASD / arrows to drive · Space to drift · C camera · M map · / address</div>
 
 <div class="touch" aria-hidden="true">
@@ -273,6 +292,7 @@
       <span><kbd>C</kbd> · drag mouse</span><span>Change camera · look around</span>
       <span><kbd>M</kbd> · <kbd>H</kbd> · <kbd>R</kbd></span><span>City map · horn · back to the road</span>
       <span><kbd>T</kbd></span><span>Golden hour, midday, blue hour or night</span>
+      <span><kbd>1</kbd> – <kbd>4</kbd></span><span>On foot, car, bicycle, helicopter (<kbd>Space</kbd> <kbd>Q</kbd> up and down)</span>
     </div>
     <p class="keys-touch">Hold <b>◀ ▶</b> to steer, <b>Gas</b> and <b>Brake</b> on the right (hold Brake to reverse), <b>Drift</b> to slide. Drag the screen to look around and tap the mini map to open the city map.</p>
     <button class="go" id="goBtn" type="button" disabled>Loading the city…</button>
@@ -325,6 +345,7 @@ import { BODY_SPECS, buildCarGeometry, buildCarProxyGeometry, buildSteerableWhee
 import { PersonCrowd, PersonRig } from './nyc/pedestrians.js';
 import { CityAudio } from './nyc/audio.js';
 import { createTreeField } from './mpls-trees.js';
+import { createModes } from './mpls-modes.js';
 
 /* =====================================================================
    Mpls Drive — a third-person toy car loose in Balloon Escape's
@@ -2625,6 +2646,66 @@ function poseCar(dt) {
   carMat.userData.carState.value.x = input.brake > 0 && Math.abs(P.fwd) > 0.5 ? 1 : 0;
 }
 
+/* ---------------------- On foot, bike, helicopter ----------------------
+   Slop New York's other ways round (mpls-modes.js). The car waits where
+   you left it; switching back to it puts it on the nearest main street.
+   While you're out of it, `player` follows you, so the map, the camera,
+   the streaming, the traffic and the people all go where you go.         */
+let mode = 'car';
+/** Push a circle of radius R at pos clear of walls, fences and posts taller than y. */
+function resolveSolids(pos, R, y) {
+  querySolids(pos.x - R - 1, pos.z - R - 1, pos.x + R + 1, pos.z + R + 1, (S, i) => {
+    if (S.h[i] < y - 0.8) return;
+    const ax = S.x1[i], az = S.z1[i], ex = S.x2[i] - ax, ez = S.z2[i] - az, L2 = ex * ex + ez * ez;
+    const t = L2 > 1e-6 ? clamp(((pos.x - ax) * ex + (pos.z - az) * ez) / L2, 0, 1) : 0;
+    const qx = pos.x - (ax + ex * t), qz = pos.z - (az + ez * t), d = Math.hypot(qx, qz), need = R + S.r[i];
+    if (d < need && d > 1e-5) { pos.x += qx / d * (need - d); pos.z += qz / d * (need - d); }
+  });
+}
+const modes = createModes(scene, { ground: (x, z, y) => surfaceY(x, z, y) + ROAD_Y, resolve: resolveSolids, lowPower: LOW_POWER });
+const MODE_NAMES = { person: 'On foot', car: 'Car', cyclist: 'Bicycle', helicopter: 'Helicopter' };
+function renderModeBar() {
+  for (const b of document.querySelectorAll('#modebar button')) b.setAttribute('aria-pressed', String(b.dataset.mode === mode));
+  document.getElementById('hintline').textContent = mode === 'helicopter' ? 'W S fly · A D turn · Space Q up and down · Shift faster · 2 back to the car'
+    : mode === 'person' ? 'WASD to walk · Shift run · Space jump · 2 back to the car' : mode === 'cyclist' ? 'WASD to ride · Shift sprint · 2 back to the car'
+      : 'WASD / arrows to drive · Space to drift · C camera · M map · / address';
+}
+function setMode(next) {
+  if (next === mode || !MODE_NAMES[next]) return;
+  const from = mode === 'car' ? { x: player.x, y: player.y, z: player.z, h: player.h } : { ...modes.active.position, h: modes.active.heading };
+  if (next === 'car') {
+    modes.setActive(null);
+    placeOnRoad(from.x, from.z, from.h);
+  } else {
+    // Out of the car on the kerb side; on to the bike or up into the helicopter where you stand.
+    const side = mode === 'car' && next === 'person' ? 2.2 : 0;
+    const x = from.x + Math.cos(from.h) * side, z = from.z - Math.sin(from.h) * side;
+    modes.setActive(next, x, surfaceY(x, z, from.y + 1) + ROAD_Y + (next === 'helicopter' && from.y - groundH(from.x, from.z) > 5 ? from.y - groundH(from.x, from.z) : 0), z, from.h);
+    Object.assign(player, { vx: 0, vz: 0, fwd: 0, lat: 0, steer: 0, sinking: 0 });
+  }
+  mode = next;
+  sfx.setVoice(mode);
+  camState.snap = true;
+  renderModeBar();
+  toast(MODE_NAMES[mode]);
+}
+document.getElementById('modebar').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-mode]');
+  if (b) { sfx.init(); setMode(b.dataset.mode); b.blur(); }
+});
+renderModeBar();
+const modeKeys = { forward: 0, backward: 0, left: 0, right: 0, up: 0, down: 0, boost: false };
+/** Move whoever you are when you aren't in the car, and have `player` follow. */
+function stepAvatar(dt, now) {
+  Object.assign(modeKeys, {
+    forward: input.gas, backward: input.brake, left: Math.max(0, -input.steer), right: Math.max(0, input.steer),
+    up: keys.has(' ') || keys.has('e') || touchState.tDrift ? 1 : 0, down: keys.has('q') ? 1 : 0, boost: input.boost,
+  });
+  modes.update(dt, modeKeys, now / 1000);
+  const e = modes.active;
+  Object.assign(player, { x: e.position.x, y: e.position.y, z: e.position.z, h: e.heading, fwd: e.speed, vx: Math.sin(e.heading) * e.speed, vz: Math.cos(e.heading) * e.speed });
+}
+
 /* -------------------------------- Camera -------------------------------- */
 const CAMS = [
   { dist: 7.2, height: 2.4, look: 1.3, name: 'Chase cam' },
@@ -2654,7 +2735,8 @@ function clearDistance(px, pz, dx, dz, dist, camY) {
 
 function stepCamera(dt) {
   const P = player;
-  const C = CAMS[camMode];
+  const C0 = CAMS[camMode], chase = mode === 'car' ? 1 : modes.active.chase;
+  const C = { dist: C0.dist * chase, height: C0.height * chase, look: mode === 'car' ? C0.look : modes.active.look };
   // Follow the direction of travel, not just the nose, so drifts look like drifts.
   let follow = P.h;
   if (Math.hypot(P.vx, P.vz) > 4 && P.fwd > 0) {
@@ -2723,6 +2805,7 @@ const sfx = (() => {
     for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
     // Engines, wind, horns and crashes: Slop New York's synthesised voices (nyc/audio.js), the traffic placed in 3D.
     city = new CityAudio(ctx, master, { small: LOW_POWER });
+    city.setPlayerKind({ car: 'sedan', cyclist: 'cyclist', helicopter: 'helicopter' }[mode] || null);
     // Tyre squeal: looping noise through a narrow band.
     const ns = ctx.createBufferSource(); ns.buffer = noise; ns.loop = true;
     const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1900; bp.Q.value = 6;
@@ -2748,11 +2831,11 @@ const sfx = (() => {
         speed: tr.speed, load: tr.brake ? 0.05 : 0.3, heading: tPos.h[n], seed: n * 0.618, blocked: tr.speed < 0.5 && tr.bump <= 0 && d < 18 });
     });
     motors.sort((a, b) => a.d - b.d);
-    city.update(dt, camera, { speed: P.sinking > 0 ? 0 : v, load }, motors, { night: nightU.value, traffic: clamp(motors.length / 8, 0, 1) });
+    city.update(dt, camera, { speed: P.sinking > 0 ? 0 : v, load, verticalSpeed: mode === 'helicopter' ? modes.active.verticalSpeed : 0 }, motors, { night: nightU.value, traffic: clamp(motors.length / 8, 0, 1) });
     const slide = Math.abs(P.lat);
     const squeal = P.surf !== 0 && !P.sinking ? clamp((slide - 3) / 8, 0, 1) * 0.16 : 0;
     skid.gain.setTargetAtTime(squeal, t, 0.06);
-    if (input.horn && !hornWas) city.emit('horn', { x: P.x, y: P.y + 0.8, z: P.z, heading: P.h, seed: 4 }, { intensity: 0.7 });
+    if (input.horn && !hornWas && mode === 'car') city.emit('horn', { x: P.x, y: P.y + 0.8, z: P.z, heading: P.h, seed: 4 }, { intensity: 0.7 });
     hornWas = input.horn;
   }
   function burst(dur, freq, vol, type = 'lowpass') {
@@ -2786,6 +2869,8 @@ const sfx = (() => {
         o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.55);
       });
     },
+    /** The engine you hear: the car's, the bike's freewheel, the helicopter's rotors, or none on foot. */
+    setVoice(m) { city?.setPlayerKind({ car: 'sedan', cyclist: 'cyclist', helicopter: 'helicopter' }[m] || null); },
     get on() { return on; },
     set on(v) { on = v; store.set('sound', v); if (master) master.gain.setTargetAtTime(v ? 0.8 : 0, ctx.currentTime, 0.05); },
     pause(p) { if (ctx) (p ? ctx.suspend() : ctx.resume())?.catch?.(() => {}); },
@@ -2911,6 +2996,10 @@ function drawBig() {
 }
 function jumpTo(x, z) {
   placeOnRoad(x, z);
+  if (mode !== 'car') {
+    const lift = mode === 'helicopter' ? 60 : 0;
+    modes.setActive(mode, player.x, player.y + ROAD_Y + lift, player.z, player.h);
+  }
   closeMap();
   toast(chunkAt(player.x, player.z) ? 'Dropped you on the nearest main street' : 'Loading the neighbourhood…');
 }
@@ -3137,9 +3226,10 @@ window.addEventListener('keydown', (e) => {
   keys.add(k);
   if (k === 'c') cycleCam();
   if (k === 't') cycleTime();
+  if (['1', '2', '3', '4'].includes(k)) setMode(['person', 'car', 'cyclist', 'helicopter'][+k - 1]);
   if (k === 'm') mapOpen ? closeMap() : openMap();
   if (k === '/') { e.preventDefault(); keys.delete(k); openSearch(); }
-  if (k === 'r' && !paused) { placeOnRoad(player.x, player.z, player.h); toast('Back on the road'); }
+  if (k === 'r' && !paused && mode === 'car') { placeOnRoad(player.x, player.z, player.h); toast('Back on the road'); }
 });
 window.addEventListener('keyup', (e) => keys.delete(e.key.toLowerCase()));
 window.addEventListener('blur', () => keys.clear());
@@ -3287,7 +3377,8 @@ function loop(now = performance.now()) {
   stepStreaming(dt);
   if (started && !paused && !mapOpen) {
     readInput();
-    if (chunkAt(player.x, player.z)) stepCar(dt);   // after a long jump, wait for the ground to arrive
+    if (!chunkAt(player.x, player.z)) { /* after a long jump, wait for the ground to arrive */ } else if (mode === 'car') stepCar(dt);
+    else stepAvatar(dt, now);
     stepTraffic(dt);
     stepPeople(dt);
     checkLandmarks();
@@ -3295,7 +3386,7 @@ function loop(now = performance.now()) {
   } else if (!started) {
     if (cityLoaded) stepTraffic(dt);
   }
-  poseCar(dt);
+  if (mode === 'car') poseCar(dt);              // out of it, the car stays parked where you left it
   if (dbgCam) { /* a debug view holds the camera */ } else if (started) stepCamera(dt); else stepIntroCamera(dt);
   stepPuffs(dt);
   for (const p of landmarkPins) {
@@ -3321,7 +3412,7 @@ if (location.hash === '#debug') {
     player, input, camState, keys, traffic, tPos, placeOnRoad, surfaceAt, deckAt, groundH, bridges, cityXZ, scene, shadowCatcher, chunks, readyChunks, MAP, renderer, camera, stepDetail, stepStreaming,
     /** Render one frame from a given camera spot (screenshots while frames are paused). */
     view(x, y, z, lx, ly, lz) { dbgCam = true; camera.position.set(x, y, z); camera.lookAt(lx, ly, lz); for (let i = 0; i < 40; i++) { stepStreaming(0.3); stepDetail(); } trees.update(camera.position); renderPipeline.render(); },
-    applyTime, THREE, TIMES, hemi, sun, roadMat, cityMat, renderPipeline, people, crowd, lighting,
+    applyTime, THREE, TIMES, hemi, sun, roadMat, cityMat, renderPipeline, people, crowd, lighting, setMode, modes, stepAvatar, stepCamera, keys, get mode() { return mode; },
     sim(sec, held = []) {
       keys.clear();
       held.forEach(k => keys.add(k));

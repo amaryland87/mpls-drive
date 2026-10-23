@@ -86,7 +86,16 @@ class CityAudio {
     this.lastHorn = -Infinity;
     this.params = { speed: 0, load: 0, verticalSpeed: 0, doppler: 1, seed: 0 };
     // The player's own engine, heard from inside: not positioned, so it never pans as the camera swings round.
-    this.engine = createMotorVoice(context, this.resources, 'sedan', this.mix);
+    this.engine = null;
+    this.setPlayerKind('sedan');
+  }
+
+  /** The player's motor voice: 'sedan', 'cyclist', 'helicopter', or null (on foot). */
+  setPlayerKind(kind) {
+    if (kind === this.engineKind) return;
+    this.engine?.dispose();
+    this.engine = kind ? createMotorVoice(this.context, this.resources, kind, this.mix) : null;
+    this.engineKind = kind;
   }
 
   /** player: { speed, load }; motors: nearest first, [{ id, kind, x, y, z, speed, load, heading, seed, blocked }]. */
@@ -94,7 +103,7 @@ class CityAudio {
     const ctx = this.context;
     if (ctx.state !== 'running') return;
     const now = ctx.currentTime;
-    this.engine.update({ speed: player.speed, load: player.load, seed: 1.7 }, now);
+    this.engine?.update({ speed: player.speed, load: player.load, verticalSpeed: player.verticalSpeed || 0, seed: 1.7 }, now);
     this.acc += dt;
     if (this.acc < 0.1) return;
     dt = Math.min(this.acc, 0.25);
