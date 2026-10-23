@@ -114,6 +114,7 @@ class CityAudio {
     camera.updateMatrixWorld();
     const m = camera.matrixWorld.elements, L = ctx.listener;
     const values = [pos.x, pos.y, pos.z, -m[8], -m[9], -m[10], m[4], m[5], m[6]];
+    if (!values.every(Number.isFinite)) return;
     if (L.positionX) {
       const params = [L.positionX, L.positionY, L.positionZ, L.forwardX, L.forwardY, L.forwardZ, L.upX, L.upY, L.upZ];
       params.forEach((p, i) => (this.haveListener ? smooth(p, values[i], now, 0.025) : p.setValueAtTime(values[i], now)));

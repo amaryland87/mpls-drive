@@ -410,8 +410,11 @@ const host = document.getElementById('scene');
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(62, 1, 0.3, 1700);
 // three.js's WebGPU renderer, as in Slop New York: WebGPU where the browser has it, WebGL 2 where it doesn't.
-const renderer = new THREE.WebGPURenderer({ antialias: true, powerPreference: 'high-performance' });
-let pixelRatio = Math.min(window.devicePixelRatio, LOW_POWER ? 1.5 : 2);
+const renderer = new THREE.WebGPURenderer({
+  antialias: true, powerPreference: 'high-performance',
+  trackTimestamp: location.hash === '#debug',     // GPU timings for the test hook
+});
+let pixelRatio = Math.min(window.devicePixelRatio, LOW_POWER ? 1.25 : 2);
 renderer.setPixelRatio(pixelRatio);
 renderer.shadowMap.enabled = true;
 // Clustered lighting, as in Slop New York, so dozens of street lamps can light the streets at once.
@@ -446,6 +449,7 @@ const groundTintU = uniform(new THREE.Vector3(1, 1, 1));
 
 const lighting = new LightingSystem(scene, renderer);
 const hemi = lighting.hemiLight, sun = lighting.sunLight;
+if (LOW_POWER) sun.shadow.mapSize.set(1024, 1024);   // NYC's 2048-3072 per cascade is too much for a phone
 const SHADOW_R = LOW_POWER ? 50 : 90;          // the shadow catcher on the unlit map reaches this far round the car
 
 /* ---------------------------- Post-processing ---------------------------
@@ -1581,13 +1585,12 @@ function stadiumMeshes(ch, b) {
   for (let e = 0; e < b[6]; e++) ring.push([b[7 + e * 2], b[8 + e * 2]]);
   const s = seat(ring);
   for (const m of createStadium({ ring, base: s.y, foot: s.foot, night: nightU, castShadow: !LOW_POWER })) {
-    scene.add(m);
     ch.objects.push(m);
   }
 }
 
 /** Lay a tile's big buildings into 500 m pieces and set up the rest to be built when the camera comes near. */
-function buildChunkCity(ch, data) {
+function* buildChunkCity(ch, data) {
   const pieces = new Map();
   const pieceAt = (x, z) => {
     const i = clamp(Math.floor((x - ch.x0) / PIECE), 0, MAP.tile / PIECE - 1), j = clamp(Math.floor((z - ch.z0) / PIECE), 0, MAP.tile / PIECE - 1);
@@ -1599,7 +1602,9 @@ function buildChunkCity(ch, data) {
     return T;
   };
   const S = newSolids();
+  let k = 0;
   for (const b of data.b) {
+    if (++k % 6 === 0) yield;
     let cx = 0, cz = 0;
     const n = b[6];
     for (let e = 0; e < n; e++) { cx += b[7 + e * 2]; cz += b[8 + e * 2]; }
@@ -1608,6 +1613,7 @@ function buildChunkCity(ch, data) {
     building(pieceAt(cx / n, cz / n).G, null, b.slice());
   }
   for (const hx of data.hx || []) heroGeo(pieceAt(hx.x, hx.z).G, S, hx);
+  yield;
   // Collision for everything now; the shapes of the small things wait until they're near.
   const footprint = (x, z, ang, W, D, H) => {
     const P = localFrame(x, z, ang);
@@ -1647,6 +1653,7 @@ function buildChunkCity(ch, data) {
   }
   for (let i = 0; i < (data.jn || []).length; i += 3) pieceAt(data.jn[i] / 10, data.jn[i + 1] / 10).jn.push(data.jn.slice(i, i + 3));
   for (let i = 0; i < (data.cw || []).length; i += 4) pieceAt(data.cw[i] / 10, data.cw[i + 1] / 10).cw.push(data.cw.slice(i, i + 4));
+  yield;
   // For the radar's street chips: every corner's two names.
   ch.cornerSigns = [];
   for (let i = 0; i < data.s.length; i += 6) ch.cornerSigns.push(data.s.slice(i, i + 6));
@@ -1656,33 +1663,41 @@ function buildChunkCity(ch, data) {
     ch.signMat = new THREE.MeshStandardMaterial({ map: ch.signs.tex, roughness: 0.5 });   // one-sided: each face carries its own text
   }
   for (const T of pieces.values()) {
+    yield;
     const m = T.G.mesh(cityMat);
-    if (m) { scene.add(m); ch.objects.push(m); }
+    if (m) ch.objects.push(m);
     T.G = null;
     if (T.h.length || T.g.length || T.t.length || T.f.length || T.s.length || T.rd.length) ch.pieces.push(T);
   }
+  yield;
   ch.solids = finishSolids(S);
 }
 
 /** Build a piece's houses, garages, fences, signs and trees. */
-function buildDetail(T) {
+function* buildDetail(T) {
   const ch = T.ch, out = [];
   const G = new Geo();
-  for (const h of T.h) houseGeo(G, h);
-  for (const g of T.g) garageGeo(G, g);
+  let k = 0;
+  for (const h of T.h) { houseGeo(G, h); if (++k % 8 === 0) yield; }
+  for (const g of T.g) { garageGeo(G, g); if (++k % 16 === 0) yield; }
+  yield;
   T.f.forEach((f, n) => fenceGeo(G, f, n + f[2]));
   const B = { p: [], uv: [], push(...v) { this.p.push(...v); } };
   for (const s of T.s) signGeo(G, B, s, ch.signs);
+  yield;
   const m = G.mesh(cityMat);
   if (m) out.push(m);
+  yield;
   const S = { road: new Geo(true), walk: new Geo(true), curb: new Geo(true), trail: new Geo(true), paint: new PaintGeo() };
-  for (const r of T.rd) streetGeo(S, r);
+  for (const r of T.rd) { streetGeo(S, r); if (++k % 8 === 0) yield; }
   for (const [x, z, r] of T.jn) junctionGeo(S.road, x / 10, z / 10, r / 10);
+  yield;
   for (const [x, z, a, w] of T.cw) crosswalkGeo(S.paint, x / 10, z / 10, a / 100, w / 10);
   const lamps = [];
   for (const r of T.rd) lampSpots(r, lamps);
   if (lamps.length) out.push(...lampMeshes(T, lamps));
   for (const [geo, mat] of [[S.road, nycRoadMat], [S.walk, nycWalkMat], [S.curb, nycCurbMat], [S.trail, roadMat], [S.paint, nycPaintMat]]) {
+    yield;
     const mm = geo.mesh(mat);
     if (mm) { mm.castShadow = false; mm.receiveShadow = true; out.push(mm); }
   }
@@ -1693,6 +1708,8 @@ function buildDetail(T) {
     g.computeVertexNormals();
     out.push(new THREE.Mesh(g, ch.signMat));
   }
+  yield;
+  if (T.ch.dropped) { lampSites.delete(T); for (const o of out) if (!o.isInstancedMesh) o.geometry.dispose(); return; }
   trees.add(T, T.t.map(([x10, z10, h10, r10]) => ({ x: x10 / 10, z: z10 / 10, y: groundH(x10 / 10, z10 / 10), h: h10 / 10, r: r10 / 10 })));
   for (const o of out) scene.add(o);
   T.built = out;
@@ -1828,25 +1845,35 @@ function loadChunk(i, j) {
     .catch((err) => { console.warn(err); ch.failed = performance.now(); })
     .finally(() => { loadingCount--; });
 }
-function buildChunk(ch, data, img) {
+/** A tile, a step at a time (see stepStreaming): its ground, its surface map, its city; shown once it's whole. */
+function* buildChunk(ch, data, img) {
   const tex = new THREE.Texture(img);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = MAX_ANISO;
   tex.needsUpdate = true;
-  const mat = groundMaterial(mapBounds, 1);
-  mat.map = tex;
-  mat.color.set('#ffffff');
-  mat.transparent = true;                          // for the fade at the map's edge
+  ch.tex = tex;
+  const mat = groundMaterial(mapBounds, 1);       // fades out at the map's edge
+  mat.userData.mapNode.value = tex;
   const ground = new THREE.Mesh(tileGroundGeo(ch), mat);
   ground.position.set(ch.x0 + MAP.tile / 2, 0, ch.z0 + MAP.tile / 2);
   ground.renderOrder = -1;                         // it writes depth, so a hill hides what's over it
-  scene.add(ground);
   ch.ground = ground;
   ch.img = img;
+  yield;
   ch.surface = readSurface(img);
-  buildChunkCity(ch, data);
+  yield;
+  yield* buildChunkCity(ch, data);
+  scene.add(ground, ...ch.objects);
   ch.ready = true;
   readyChunks.push(ch);
+}
+/** A tile dropped before it was finished: free what its build had made. */
+function abandonChunk(ch) {
+  ch.tex?.dispose();
+  ch.ground?.geometry.dispose();
+  ch.ground?.material.dispose();
+  for (const m of ch.objects) m.geometry?.dispose();
+  ch.objects = ch.pieces = ch.img = ch.surface = null;
 }
 function dropChunk(ch) {
   ch.dropped = true;
@@ -1856,7 +1883,7 @@ function dropChunk(ch) {
   if (k >= 0) readyChunks.splice(k, 1);
   scene.remove(ch.ground);
   ch.ground.geometry.dispose();
-  ch.ground.material.map.dispose();
+  ch.tex.dispose();
   ch.ground.material.dispose();
   for (const m of ch.objects) {
     scene.remove(m);
@@ -1888,11 +1915,30 @@ function stepStreaming(dt) {
   if (!indexLoaded) return;
   streamTimer -= dt;
   if (streamTimer <= 0) { streamTimer = 0.25; streamChunks(player.x, player.z); }
-  // One tile per frame, nearest first, unless the car is waiting on the one under it.
-  if (!buildQueue.length) return;
-  buildQueue.sort((a, b) => tileDistance(a.ch.i, a.ch.j, player.x, player.z) - tileDistance(b.ch.i, b.ch.j, player.x, player.z));
-  const n = chunkAt(player.x, player.z) ? 1 : buildQueue.length;
-  for (const job of buildQueue.splice(0, n)) if (!job.ch.dropped) buildChunk(job.ch, job.data, job.img);
+  // Tiles are built nearest first, a few milliseconds a frame so driving never stalls, unless the car is waiting
+  // on the tile under it: then everything queued is built at once.
+  const urgent = !chunkAt(player.x, player.z), t0 = performance.now();
+  while (urgent || performance.now() - t0 < BUILD_MS) {
+    if (!chunkJob) {
+      if (!buildQueue.length) break;
+      buildQueue.sort((a, b) => tileDistance(a.ch.i, a.ch.j, player.x, player.z) - tileDistance(b.ch.i, b.ch.j, player.x, player.z));
+      const job = buildQueue.shift();
+      if (!job.ch.dropped) chunkJob = { ch: job.ch, it: buildChunk(job.ch, job.data, job.img) };
+      continue;
+    }
+    if (chunkJob.ch.dropped) { abandonChunk(chunkJob.ch); chunkJob = null; continue; }
+    const s0 = performance.now(), done = chunkJob.it.next().done;
+    prof('tileStep', s0);
+    if (done) chunkJob = null;
+  }
+}
+const BUILD_MS = LOW_POWER ? 3 : 5;             // milliseconds of building a frame, for tiles and for detail each
+let chunkJob = null, detailJob = null;
+// Where the time goes, for the test hook: total and worst milliseconds per named job.
+const PROF = {};
+function prof(name, t0) {
+  const ms = performance.now() - t0, p = PROF[name] ??= { n: 0, total: 0, max: 0 };
+  p.n++; p.total += ms; p.max = Math.max(p.max, ms);
 }
 
 /** Build the houses, garages, trees, fences and signs of pieces near the camera, nearest first, one a frame; drop far ones. */
@@ -1905,12 +1951,18 @@ function stepDetail() {
     if (T.built && d > DETAIL_R + 300) dropDetail(T);
     else if (!T.built && d < DETAIL_R && d < bestD) { best = T; bestD = d; }
   }
-  if (!best) return;
-  try {
-    buildDetail(best);
-  } catch (err) {
-    console.error(err);                            // leave the piece bare rather than stop the game
-    best.built = [];
+  if (!detailJob && best) detailJob = { T: best, it: buildDetail(best) };
+  const t0 = performance.now();
+  while (detailJob && performance.now() - t0 < BUILD_MS) {
+    const s0 = performance.now();
+    try {
+      if (detailJob.it.next().done) detailJob = null;
+    } catch (err) {
+      console.error(err);                          // leave the piece bare rather than stop the game
+      detailJob.T.built = [];
+      detailJob = null;
+    }
+    prof('detailStep', s0);
   }
 }
 
@@ -3423,6 +3475,17 @@ async function loadCity() {
     stepStreaming(0.1);                            // in case frames are paused (a background tab)
   }
   buildTraffic();
+  // Build the nearby streets and compile their shaders now, behind the start card, rather than in the first
+  // seconds of driving (each new material's first draw stalls a frame or more while its pipeline is made).
+  goBtn.textContent = 'Getting the streets ready…';
+  stepIntroCamera(0);                              // the detail is built round the camera: put it over the car
+  for (let i = 0; i < 400 && readyChunks.some(ch => ch.pieces.some(T => !T.built && Math.hypot(T.cx - player.x, T.cz - player.z) < 400)); i++) {
+    stepDetail();
+    if (i % 20 === 19) await new Promise(r => setTimeout(r, 0));
+  }
+  trees.update(camera.position);
+  // At most a few seconds: whatever isn't ready by then compiles when it's first drawn, as it would have anyway.
+  await Promise.race([renderer.compileAsync(scene, camera).catch((err) => console.warn('precompile', err)), new Promise(r => setTimeout(r, 5000))]);
   cityLoaded = true;
   goBtn.disabled = false;
   goBtn.textContent = 'Start driving';
@@ -3434,6 +3497,7 @@ loadCity().catch((err) => {
 
 function resize() {
   const w = host.clientWidth, h = host.clientHeight;
+  if (!w || !h) return;                        // hidden: keep the last size rather than a 0 x 0 view
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
@@ -3447,8 +3511,10 @@ function watchPerf(dt) {
   perf.t += dt; perf.frames++;
   if (perf.t < 3) return;
   const avg = perf.t / perf.frames;
-  if (avg > 1 / 40 && pixelRatio > 1) {
-    pixelRatio = Math.max(1, pixelRatio - 0.5);
+  // Below 40 fps, render fewer pixels: in quarter steps, down to the screen's own on phones (CSS pixels on desktops).
+  const floorRatio = LOW_POWER ? 0.75 : 1;
+  if (avg > 1 / 40 && pixelRatio > floorRatio) {
+    pixelRatio = Math.max(floorRatio, pixelRatio - 0.25);
     renderer.setPixelRatio(pixelRatio);
     resize();
   }
@@ -3458,6 +3524,10 @@ function watchPerf(dt) {
 let frame = 0, lastT = performance.now(), dbgCam = false;
 function loop(now = performance.now()) {
   requestAnimationFrame(loop);
+  frameStep(now);
+}
+/** One frame: the simulation, then the render. */
+function frameStep(now) {
   const dt = Math.min(0.05, Math.max(0, (now - lastT) / 1000));
   lastT = now;
   frame++;
@@ -3486,7 +3556,7 @@ function loop(now = performance.now()) {
   stepLampLights();
   fitShadowCatcher(Math.round(player.x), Math.round(player.z));
   if (indexLoaded) stepDetail();
-  trees.update(camera.position);
+  { const t0 = performance.now(); trees.update(camera.position); prof('trees.update', t0); }
   if (started && frame % 2 === 0) { drawMini(); updateHud(); updateStreetChips(now); }
   if (started) watchPerf(dt);
   renderPipeline.render();
@@ -3499,6 +3569,7 @@ if (location.hash === '#debug') {
     player, input, camState, keys, traffic, tPos, placeOnRoad, surfaceAt, deckAt, groundH, bridges, cityXZ, scene, shadowCatcher, chunks, readyChunks, MAP, renderer, camera, stepDetail, stepStreaming,
     /** Render one frame from a given camera spot (screenshots while frames are paused). */
     view(x, y, z, lx, ly, lz) { dbgCam = true; camera.position.set(x, y, z); camera.lookAt(lx, ly, lz); for (let i = 0; i < 40; i++) { stepStreaming(0.3); stepDetail(); } trees.update(camera.position); renderPipeline.render(); },
+    PROF, frameStep, trees, lampLights, scenePass, stepTraffic, stepPeople, stepLampLights, poseCar,
     applyTime, THREE, TIMES, hemi, sun, roadMat, cityMat, renderPipeline, people, crowd, lighting, setMode, modes, stepAvatar, stepCamera, keys, drawMini, updateStreetChips, get mode() { return mode; },
     sim(sec, held = []) {
       keys.clear();
