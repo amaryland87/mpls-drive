@@ -91,13 +91,31 @@
   #toast.show { opacity: 1; transform: translate(-50%, 0); }
   #toast.found { background: #fff6d6; }
 
+  /* Radar (after Slop New York's): graphite, heading up, the street you're on in green chips above it. */
   .minimap {
     position: fixed; left: 16px; bottom: calc(16px + var(--safe-b)); z-index: 4;
-    width: 168px; height: 168px; border-radius: 50%;
-    box-shadow: var(--shadow), 0 0 0 4px rgba(255,255,255,0.85);
-    overflow: hidden; background: #a9d17c; cursor: pointer;
+    width: 232px; height: 150px; border-radius: 14px;
+    box-shadow: var(--shadow), 0 0 0 1px rgba(255,255,255,0.18);
+    overflow: hidden; background: #0a1118; cursor: pointer;
   }
   .minimap canvas { width: 100%; height: 100%; display: block; }
+  .streetchips { position: fixed; left: 16px; bottom: calc(176px + var(--safe-b)); z-index: 4; display: flex; gap: 6px; pointer-events: none; }
+  .streetchips span {
+    font: 600 12px/1 system-ui, sans-serif; color: #fff; background: #0d6b3f; border: 1.5px solid rgba(255,255,255,0.85);
+    border-radius: 5px; padding: 5px 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.25); white-space: nowrap;
+  }
+  .streetchips span:empty { display: none; }
+  body:not(.driving) .streetchips, body:not(.driving) .modebar { visibility: hidden; }
+  /* Teleport menu (after Slop New York's): the places, one click away. */
+  .tpmenu {
+    position: fixed; z-index: 6; top: calc(max(10px, env(safe-area-inset-top)) + 46px); right: 12px; width: min(300px, calc(100vw - 24px));
+    max-height: min(420px, 70vh); overflow: auto; margin: 0; padding: 6px; list-style: none;
+    background: var(--card); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-radius: var(--radius); box-shadow: var(--shadow);
+  }
+  .tpmenu[hidden] { display: none; }
+  .tpmenu button { display: flex; width: 100%; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 0; border-radius: 8px; background: none; text-align: left; cursor: pointer; }
+  .tpmenu button:hover, .tpmenu button:focus-visible { background: rgba(18, 48, 71, 0.07); }
+  .tpmenu span { color: var(--ink-soft); font-size: 12px; }
 
   .speedo {
     position: fixed; right: 18px; bottom: calc(16px + var(--safe-b)); z-index: 4;
@@ -148,7 +166,8 @@
   #tGas   { right: 14px; bottom: calc(18px + var(--safe-b)); width: 78px; height: 110px; background: rgba(214, 245, 222, 0.82); }
   #tBrake { right: 100px; bottom: calc(18px + var(--safe-b)); width: 70px; height: 76px; background: rgba(255, 224, 220, 0.82); }
   #tDrift { right: 100px; bottom: calc(104px + var(--safe-b)); width: 70px; height: 40px; font-size: 13px; border-radius: 14px; }
-  .is-touch .minimap { left: auto; right: 12px; bottom: auto; top: calc(max(10px, env(safe-area-inset-top)) + 46px); width: 112px; height: 112px; }
+  .is-touch .minimap { left: auto; right: 12px; bottom: auto; top: calc(max(10px, env(safe-area-inset-top)) + 46px); width: 150px; height: 100px; }
+  .is-touch .streetchips { display: none; }
   .is-touch .speedo { right: 12px; bottom: auto; top: calc(max(10px, env(safe-area-inset-top)) + 168px); padding: 6px 12px 8px; }
   .is-touch .speedo b { font-size: 28px; }
 
@@ -245,6 +264,9 @@
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
   </button>
   <button class="chip timebtn" id="timeBtn" type="button" title="Time of day (T)" aria-label="Change the time of day"><span id="timeIcon" aria-hidden="true"></span><b id="timeName">Golden hour</b></button>
+  <button class="chip iconbtn" id="tpBtn" type="button" title="Teleport" aria-label="Teleport" aria-expanded="false" aria-controls="tpmenu">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s-7-6.1-7-11.5a7 7 0 0 1 14 0C19 14.9 12 21 12 21Z"/><circle cx="12" cy="9.5" r="2.5"/></svg>
+  </button>
   <button class="chip" id="placesBtn" type="button" title="City map and places to find"><span>Places</span><b id="placesCount">0/0</b></button>
   <button class="chip iconbtn" id="camBtn" type="button" title="Change camera (C)" aria-label="Change camera">
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8a2 2 0 0 1 2-2h2l2-2h6l2 2h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>
@@ -259,7 +281,9 @@
 
 <div id="toast" role="status" aria-live="polite"></div>
 
-<div class="minimap" id="minimap" title="Open the city map (M)"><canvas id="mini" width="336" height="336"></canvas></div>
+<div class="streetchips" id="streetchips" aria-live="polite"><span id="chipOn"></span><span id="chipCross"></span></div>
+<div class="minimap" id="minimap" title="Open the city map (M)"><canvas id="mini" width="464" height="300"></canvas></div>
+<ul class="tpmenu" id="tpmenu" hidden aria-label="Teleport"></ul>
 <div class="speedo"><b id="speed">0</b><span>mph</span><i id="gear">P</i></div>
 <div class="modebar" id="modebar" role="group" aria-label="Get around">
   <button type="button" data-mode="person" title="On foot (1)" aria-label="On foot"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13" cy="4" r="2"/><path d="m9 21 2-6 3 3v3M7 12l3-4 4 1 3 3M10 8l-1 6"/></svg></button>
@@ -1640,6 +1664,10 @@ function buildChunkCity(ch, data) {
   }
   for (let i = 0; i < (data.jn || []).length; i += 3) pieceAt(data.jn[i] / 10, data.jn[i + 1] / 10).jn.push(data.jn.slice(i, i + 3));
   for (let i = 0; i < (data.cw || []).length; i += 4) pieceAt(data.cw[i] / 10, data.cw[i + 1] / 10).cw.push(data.cw.slice(i, i + 4));
+  // For the radar's street chips: every corner's two names.
+  ch.cornerSigns = [];
+  for (let i = 0; i < data.s.length; i += 6) ch.cornerSigns.push(data.s.slice(i, i + 6));
+  ch.streetNames = data.sn;
   if (data.sn.length) {
     ch.signs = signAtlas(data.sn);
     ch.signMat = new THREE.MeshStandardMaterial({ map: ch.signs.tex, roughness: 0.5 });   // one-sided: each face carries its own text
@@ -2913,49 +2941,125 @@ function checkLandmarks() {
 // Mini map: the loaded tiles' street maps, turned so the car always points up.
 const mini = document.getElementById('mini');
 const mg = mini.getContext('2d');
-const MINI_SPAN = 520;                        // metres across
+// The radar, after Slop New York's: graphite ground (the map, dimmed) with the streets drawn over it a shade lighter,
+// the freeways amber, the places to find as dots, you in white at the bottom third facing up. It zooms out as you climb.
+const RADAR_SCALE = 0.64;                     // canvas pixels per metre at street level
+function radarRoads(T) {
+  if (T.radar) return T.radar;
+  T.radar = T.rd.map((r) => {
+    const [cls, w10, , , , , n] = r, kind = ROAD_KINDS[cls];
+    const pts = [];
+    for (let i = 0; i < n; i++) pts.push(r[7 + i * 2] / 10, r[8 + i * 2] / 10);
+    const col = kind === 'path' ? '#2c3a2f' : /^(motorway|trunk)/.test(kind) ? '#9c7430' : /^(primary|secondary)/.test(kind) ? '#596474' : '#434c58';
+    return { pts, w: Math.max(2, w10 / 10), col, rank: kind === 'path' ? 0 : /^(motorway|trunk)/.test(kind) ? 3 : /^(primary|secondary)/.test(kind) ? 2 : 1 };
+  }).sort((a, b) => a.rank - b.rank);
+  return T.radar;
+}
 function drawMini() {
-  const W = mini.width, s = W / MINI_SPAN;
+  const W = mini.width, H = mini.height, alt = Math.max(0, player.y - groundH(player.x, player.z) - 15);
+  const s = RADAR_SCALE / (1 + alt / 90), cy = H * 0.64, R = Math.hypot(W, H) / s;
   mg.save();
-  mg.fillStyle = '#a9d17c';
-  mg.fillRect(0, 0, W, W);
-  mg.translate(W / 2, W / 2);
+  mg.fillStyle = '#0a1118';
+  mg.fillRect(0, 0, W, H);
+  mg.translate(W / 2, cy);
   mg.rotate(Math.PI + player.h);
   mg.scale(s, s);
-  const R = MINI_SPAN * 0.75;
+  mg.globalAlpha = 0.3;
   for (const ch of readyChunks) {
     if (ch.x0 > player.x + R || ch.x0 + MAP.tile < player.x - R || ch.z0 > player.z + R || ch.z0 + MAP.tile < player.z - R) continue;
     mg.drawImage(ch.img, ch.x0 - player.x, ch.z0 - player.z, MAP.tile, MAP.tile);
   }
+  mg.globalAlpha = 1;
+  mg.lineCap = mg.lineJoin = 'round';
+  for (const ch of readyChunks) for (const T of ch.pieces) {
+    if (Math.abs(T.cx - player.x) > R + PIECE || Math.abs(T.cz - player.z) > R + PIECE) continue;
+    for (const r of radarRoads(T)) {
+      mg.beginPath();
+      for (let i = 0; i < r.pts.length; i += 2) (i ? mg.lineTo : mg.moveTo).call(mg, r.pts[i] - player.x, r.pts[i + 1] - player.z);
+      mg.strokeStyle = r.col;
+      mg.lineWidth = r.w;
+      mg.stroke();
+    }
+  }
   mg.restore();
-  // landmarks
   const cs = Math.cos(Math.PI + player.h), sn = Math.sin(Math.PI + player.h);
   for (const p of landmarkPins) {
     const dx = (p.lm.x - player.x) * s, dz = (p.lm.z - player.z) * s;
     let X = dx * cs - dz * sn, Y = dx * sn + dz * cs;
-    const R = W / 2 - 12, d = Math.hypot(X, Y);
-    if (d > R) { X *= R / d; Y *= R / d; }
+    const k = Math.min(1, (W / 2 - 10) / Math.abs(X || 1), (Y < 0 ? cy - 10 : H - cy - 10) / Math.abs(Y || 1)), edge = k < 1;
+    X *= k; Y *= k;
     mg.beginPath();
-    mg.arc(W / 2 + X, W / 2 + Y, d > R ? 4.5 : 9, 0, Math.PI * 2);
-    mg.fillStyle = found.has(p.lm.name) ? '#3fa35b' : '#f2a541';
+    mg.arc(W / 2 + X, cy + Y, edge ? 4.5 : 7, 0, Math.PI * 2);
+    mg.fillStyle = found.has(p.lm.name) ? '#e8edf2' : '#f2b541';
     mg.fill();
-    mg.lineWidth = 3; mg.strokeStyle = '#fff'; mg.stroke();
+    mg.lineWidth = 2; mg.strokeStyle = '#0a1118'; mg.stroke();
   }
-  // the car
+  // You: a white arrow with a soft view cone ahead.
   mg.save();
-  mg.translate(W / 2, W / 2);
+  mg.translate(W / 2, cy);
+  const cone = mg.createRadialGradient(0, 0, 4, 0, 0, 90);
+  cone.addColorStop(0, 'rgba(255,255,255,0.22)');
+  cone.addColorStop(1, 'rgba(255,255,255,0)');
+  mg.fillStyle = cone;
+  mg.beginPath(); mg.moveTo(0, 0); mg.arc(0, 0, 90, -Math.PI / 2 - 0.55, -Math.PI / 2 + 0.55); mg.closePath(); mg.fill();
   mg.beginPath();
-  mg.moveTo(0, -16); mg.lineTo(11, 12); mg.lineTo(0, 6); mg.lineTo(-11, 12); mg.closePath();
-  mg.fillStyle = PAINTS[paintIdx]; mg.fill();
-  mg.lineWidth = 3; mg.strokeStyle = '#fff'; mg.stroke();
+  mg.moveTo(0, -13); mg.lineTo(9, 10); mg.lineTo(0, 5); mg.lineTo(-9, 10); mg.closePath();
+  mg.fillStyle = '#ffffff'; mg.fill();
+  mg.lineWidth = 2; mg.strokeStyle = '#0a1118'; mg.stroke();
   mg.restore();
-  // north marker on the rim
-  const nx = -sn, ny = -cs;
-  mg.fillStyle = '#123047';
-  mg.font = '600 24px Fredoka, system-ui, sans-serif';
+  // North, on the frame.
+  const nx = -sn, ny = -cs, kN = Math.min((W / 2 - 14) / Math.abs(nx || 1e-3), (ny < 0 ? cy - 14 : H - cy - 14) / Math.abs(ny || 1e-3));
+  mg.fillStyle = 'rgba(232,237,242,0.9)';
+  mg.font = '700 20px system-ui, sans-serif';
   mg.textAlign = 'center'; mg.textBaseline = 'middle';
-  mg.fillText('N', W / 2 + nx * (W / 2 - 20), W / 2 + ny * (W / 2 - 20));
+  mg.fillText('N', W / 2 + nx * kN, cy + ny * kN);
 }
+// The street you're on and the next cross street, from the nearest corner's street signs, as NYC shows them.
+const chipOn = document.getElementById('chipOn'), chipCross = document.getElementById('chipCross');
+let chipsAt = 0;
+function updateStreetChips(now) {
+  if (now - chipsAt < 500) return;
+  chipsAt = now;
+  let best = null, bestD = 90;
+  for (const ch of readyChunks) {
+    if (Math.abs(ch.x0 + MAP.tile / 2 - player.x) > MAP.tile || Math.abs(ch.z0 + MAP.tile / 2 - player.z) > MAP.tile) continue;
+    for (const sg of ch.cornerSigns || []) {
+      const d = Math.hypot(sg[0] / 10 - player.x, sg[1] / 10 - player.z);
+      if (d < bestD) { bestD = d; best = { sg, names: ch.streetNames }; }
+    }
+  }
+  if (!best || mode === 'helicopter') { chipOn.textContent = chipCross.textContent = ''; return; }
+  const [, , a1, n1, a2, n2] = best.sg;
+  // The blade running along your heading names your street.
+  const along = (a) => Math.abs(Math.cos(a / 100 - (Math.PI / 2 - player.h)));
+  const [on, cross] = along(a1) >= along(a2) ? [n1, n2] : [n2, n1];
+  const on2 = signText(best.names[on] || ''), cross2 = signText(best.names[cross] || '');
+  if (chipOn.textContent !== on2) chipOn.textContent = on2;
+  if (chipCross.textContent !== cross2) chipCross.textContent = cross2;
+}
+
+// The teleport menu: every place to find, one click away.
+const tpBtn = document.getElementById('tpBtn'), tpMenu = document.getElementById('tpmenu');
+function renderTpMenu() {
+  tpMenu.replaceChildren(...LANDMARKS.map((lm) => {
+    const li = document.createElement('li'), b = document.createElement('button'), name = document.createElement('b'), sub = document.createElement('span');
+    b.type = 'button';
+    name.textContent = lm.name;
+    sub.textContent = found.has(lm.name) ? 'Found' : '';
+    b.append(name, sub);
+    b.addEventListener('click', () => { tpMenu.hidden = true; tpBtn.setAttribute('aria-expanded', 'false'); jumpTo(lm.x, lm.z); toast(lm.name); });
+    li.append(b);
+    return li;
+  }));
+}
+tpBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const open = tpMenu.hidden;
+  if (open) renderTpMenu();
+  tpMenu.hidden = !open;
+  tpBtn.setAttribute('aria-expanded', String(open));
+});
+document.addEventListener('click', (e) => { if (!tpMenu.hidden && !tpMenu.contains(e.target)) { tpMenu.hidden = true; tpBtn.setAttribute('aria-expanded', 'false'); } });
 
 // The big map: whole city, landmarks, click to jump.
 const bigmap = document.getElementById('bigmap');
@@ -3400,7 +3504,7 @@ function loop(now = performance.now()) {
   fitShadowCatcher(Math.round(player.x), Math.round(player.z));
   if (indexLoaded) stepDetail();
   trees.update(camera.position);
-  if (started && frame % 2 === 0) { drawMini(); updateHud(); }
+  if (started && frame % 2 === 0) { drawMini(); updateHud(); updateStreetChips(now); }
   if (started) watchPerf(dt);
   renderPipeline.render();
 }
@@ -3412,7 +3516,7 @@ if (location.hash === '#debug') {
     player, input, camState, keys, traffic, tPos, placeOnRoad, surfaceAt, deckAt, groundH, bridges, cityXZ, scene, shadowCatcher, chunks, readyChunks, MAP, renderer, camera, stepDetail, stepStreaming,
     /** Render one frame from a given camera spot (screenshots while frames are paused). */
     view(x, y, z, lx, ly, lz) { dbgCam = true; camera.position.set(x, y, z); camera.lookAt(lx, ly, lz); for (let i = 0; i < 40; i++) { stepStreaming(0.3); stepDetail(); } trees.update(camera.position); renderPipeline.render(); },
-    applyTime, THREE, TIMES, hemi, sun, roadMat, cityMat, renderPipeline, people, crowd, lighting, setMode, modes, stepAvatar, stepCamera, keys, get mode() { return mode; },
+    applyTime, THREE, TIMES, hemi, sun, roadMat, cityMat, renderPipeline, people, crowd, lighting, setMode, modes, stepAvatar, stepCamera, keys, drawMini, updateStreetChips, get mode() { return mode; },
     sim(sec, held = []) {
       keys.clear();
       held.forEach(k => keys.add(k));
