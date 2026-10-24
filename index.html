@@ -77,6 +77,8 @@
   .chip b { font-family: var(--display); font-weight: 600; font-size: 15px; }
   .iconbtn { width: 34px; padding: 0; justify-content: center; }
   .timebtn { gap: 7px; }
+  .fpschip { position: fixed; z-index: 6; left: 50%; top: calc(max(10px, env(safe-area-inset-top)) + 46px); transform: translateX(-50%);
+    font: 600 12px/1 ui-monospace, monospace; color: #fff; background: rgba(10, 17, 24, 0.7); padding: 5px 8px; border-radius: 6px; pointer-events: none; }
   .timebtn span { display: flex; color: var(--ink); }
   .timebtn b { font-size: 13px; }
 
@@ -414,7 +416,7 @@ const renderer = new THREE.WebGPURenderer({
   antialias: true, powerPreference: 'high-performance',
   trackTimestamp: location.hash === '#debug',     // GPU timings for the test hook
 });
-let pixelRatio = Math.min(window.devicePixelRatio, LOW_POWER ? 1.25 : 2);
+let pixelRatio = 1;                              // set by the quality level (see Quality, near the end)
 renderer.setPixelRatio(pixelRatio);
 renderer.shadowMap.enabled = true;
 // Clustered lighting, as in Slop New York, so dozens of street lamps can light the streets at once.
@@ -485,8 +487,10 @@ if (!LOW_POWER) {
   ssrPass.screenEdgeFadeBlack = true;
   reflections = ssrPass.mul(metalRough.r.greaterThan(0).select(smoothstep(maxSSRRoughness, 0.55, metalRough.g), 0));
 }
-const grade = createPostProcessing(renderer, scenePass.getTextureNode('output'), reflections);
-const renderPipeline = new THREE.RenderPipeline(renderer, grade.outputNode);
+// The grade with the reflections and without: the quality level picks one (see Quality).
+const gradeSSR = LOW_POWER ? null : createPostProcessing(renderer, scenePass.getTextureNode('output'), reflections);
+const grade = createPostProcessing(renderer, scenePass.getTextureNode('output'), vec4(0));
+const renderPipeline = new THREE.RenderPipeline(renderer, (gradeSSR || grade).outputNode);
 
 /** Set the light, the sky, the haze and the grade to one of the looks. */
 function applyTime(i) {
@@ -498,6 +502,7 @@ function applyTime(i) {
   // Minneapolis is drier than NYC's looks by day: the damp film and puddles come out in the evening.
   cityUniforms.uRoadWetness.value = T.wet;
   grade.applyPreset(T.nyc);
+  gradeSSR?.applyPreset(T.nyc);
   groundTintU.value.set(...T.ground);
   nightU.value = T.night;
   // After dark the streets have a damp sheen that catches the lamps and the headlights.
@@ -1439,7 +1444,8 @@ function lampMeshes(T, spots) {
   return meshes;
 }
 // The spotlight pool: after dusk the lamps nearest the camera (and ahead of it) light the street for real.
-const LAMP_LIGHTS = LOW_POWER ? 12 : 36, LAMP_LIGHT_R = 115;
+const LAMP_LIGHTS = 36, LAMP_LIGHT_R = 115;
+let lampLightCount = LOW_POWER ? 12 : 36;           // how many of the pool are used: set by the quality level
 const lampLights = [];
 for (let i = 0; i < LAMP_LIGHTS; i++) {
   const spot = new THREE.SpotLight(0xffe8c2, 0, 25, 0.96, 0.82, 1.25);
@@ -1464,9 +1470,9 @@ function stepLampLights() {
     }
     nearLamps.sort((a, b) => a.eff - b.eff);
   }
-  const cutoff = nearLamps.length > LAMP_LIGHTS ? Math.min(LAMP_LIGHT_R, nearLamps[LAMP_LIGHTS].eff) : LAMP_LIGHT_R;
+  const cutoff = nearLamps.length > lampLightCount ? Math.min(LAMP_LIGHT_R, nearLamps[lampLightCount].eff) : LAMP_LIGHT_R;
   lampLights.forEach((spot, i) => {
-    const s = nearLamps[i];
+    const s = i < lampLightCount ? nearLamps[i] : null;
     if (!s) { spot.intensity = 0; spot.position.set(0, -1000, 0); return; }
     const t = clamp((cutoff - s.eff) / (cutoff * 0.38), 0, 1);
     spot.position.set(s.x, s.y, s.z);
@@ -3505,25 +3511,76 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-// Adaptive quality: drop the pixel ratio if frames run long.
-const perf = { t: 0, frames: 0 };
-function watchPerf(dt) {
-  perf.t += dt; perf.frames++;
-  if (perf.t < 3) return;
-  const avg = perf.t / perf.frames;
-  // Below 40 fps, render fewer pixels: in quarter steps, down to the screen's own on phones (CSS pixels on desktops).
-  const floorRatio = LOW_POWER ? 0.75 : 1;
-  if (avg > 1 / 40 && pixelRatio > floorRatio) {
-    pixelRatio = Math.max(floorRatio, pixelRatio - 0.25);
-    renderer.setPixelRatio(pixelRatio);
-    resize();
+/* ------------------------------- Quality -------------------------------
+   Four levels of what the GPU draws, picked from how fast frames really
+   come. Like Slop New York, the 3D renders at one pixel per CSS pixel
+   (the HUD stays sharp); only a fast machine with headroom goes above it.
+   Below ~50 fps it steps down quickly (fewer pixels, then no reflections,
+   no tree shadows, fewer lamp lights); it steps back up only after a good
+   while of comfortable frames, and never straight after stepping down.    */
+const QUALITY = [
+  { pr: 0.7, ssr: false, treeShadows: false, lamps: 6 },
+  { pr: LOW_POWER ? 0.85 : 1, ssr: false, treeShadows: false, lamps: 12 },
+  { pr: 1, ssr: true, treeShadows: true, lamps: 24 },
+  { pr: 1.5, ssr: true, treeShadows: true, lamps: 36 },
+];
+let qualityLevel = -1;
+function setQuality(level) {
+  level = clamp(level, 0, QUALITY.length - 1);
+  if (level === qualityLevel) return;
+  const Q = QUALITY[level], was = QUALITY[qualityLevel];
+  qualityLevel = level;
+  pixelRatio = Math.min(Q.pr, window.devicePixelRatio || 1);
+  renderer.setPixelRatio(pixelRatio);
+  resize();
+  const ssr = Q.ssr && !!gradeSSR;
+  if (!was || ssr !== (was.ssr && !!gradeSSR)) {
+    renderPipeline.outputNode = (ssr ? gradeSSR : grade).outputNode;
+    renderPipeline.needsUpdate = true;
   }
-  perf.t = 0; perf.frames = 0;
+  trees.group.traverse((m) => { if (m.isMesh) m.castShadow = Q.treeShadows; });
+  lampLightCount = Q.lamps;
 }
+const START_QUALITY = LOW_POWER ? 1 : 2;
+const perf = { t: 0, n: 0, good: 0, steady: 0, holdUntil: 0, backoff: 30000, last: 0, fpsT: 0, fpsN: 0 };
+/** Fed the real time between frames (ms); hitches over 250 ms (a hidden tab, a stall) don't count. */
+function watchPerf(ms, now) {
+  if (ms > 250 || document.hidden) return;
+  perf.t += ms; perf.n++;
+  perf.fpsT += ms; perf.fpsN++;
+  if (perf.fpsT > 500) { if (fpsEl) fpsEl.textContent = `${Math.round(1000 * perf.fpsN / perf.fpsT)} fps · q${qualityLevel}`; perf.fpsT = perf.fpsN = 0; }
+  if (perf.t < 1500) return;
+  const avg = perf.t / perf.n;
+  perf.t = perf.n = 0;
+  if (avg > 20) {                                // under ~50 fps: one level down, then let it settle
+    perf.good = perf.steady = 0;
+    if (qualityLevel > 0) { setQuality(qualityLevel - 1); perf.holdUntil = now + perf.backoff; perf.backoff = Math.min(perf.backoff * 2, 240000); }
+    return;
+  }
+  // Comfortably over 80 fps (a fast display with room to spare) for six seconds: one level up.
+  perf.good = avg < 12.5 ? perf.good + 1 : 0;
+  if (perf.good >= 4 && now > perf.holdUntil && qualityLevel < QUALITY.length - 1) { setQuality(qualityLevel + 1); perf.good = 0; return; }
+  // On a 60 Hz display frames never come faster than 60 fps, so headroom can't show: after half a minute of smooth
+  // driving below the starting level, try the next level up again (waiting twice as long after each try that fails).
+  perf.steady = avg < 17.5 ? perf.steady + 1 : 0;
+  if (perf.steady >= 20 && now > perf.holdUntil && qualityLevel < START_QUALITY) { setQuality(qualityLevel + 1); perf.steady = 0; }
+}
+// A frame-rate readout, F to show or hide.
+let fpsEl = null;
+window.addEventListener('keydown', (e) => {
+  if (e.key.toLowerCase() !== 'f' || e.metaKey || e.ctrlKey || e.altKey || e.target === searchInput) return;
+  if (fpsEl) { fpsEl.remove(); fpsEl = null; return; }
+  fpsEl = document.createElement('div');
+  fpsEl.className = 'fpschip';
+  fpsEl.textContent = '… fps';
+  document.body.append(fpsEl);
+});
 
 let frame = 0, lastT = performance.now(), dbgCam = false;
 function loop(now = performance.now()) {
   requestAnimationFrame(loop);
+  if (started) watchPerf(now - perf.last, now);
+  perf.last = now;
   frameStep(now);
 }
 /** One frame: the simulation, then the render. */
@@ -3558,10 +3615,11 @@ function frameStep(now) {
   if (indexLoaded) stepDetail();
   { const t0 = performance.now(); trees.update(camera.position); prof('trees.update', t0); }
   if (started && frame % 2 === 0) { drawMini(); updateHud(); updateStreetChips(now); }
-  if (started) watchPerf(dt);
   renderPipeline.render();
 }
 applyTime(timeIdx);
+// NYC's level (one pixel per CSS pixel, reflections) on a desktop; phones start without the reflections.
+setQuality(START_QUALITY);
 loop();
 if (location.hash === '#debug') {
   // Test hook: run the simulation in fixed steps, independent of frame rate.
@@ -3569,7 +3627,7 @@ if (location.hash === '#debug') {
     player, input, camState, keys, traffic, tPos, placeOnRoad, surfaceAt, deckAt, groundH, bridges, cityXZ, scene, shadowCatcher, chunks, readyChunks, MAP, renderer, camera, stepDetail, stepStreaming,
     /** Render one frame from a given camera spot (screenshots while frames are paused). */
     view(x, y, z, lx, ly, lz) { dbgCam = true; camera.position.set(x, y, z); camera.lookAt(lx, ly, lz); for (let i = 0; i < 40; i++) { stepStreaming(0.3); stepDetail(); } trees.update(camera.position); renderPipeline.render(); },
-    PROF, frameStep, trees, lampLights, scenePass, stepTraffic, stepPeople, stepLampLights, poseCar,
+    PROF, frameStep, setQuality, get qualityLevel() { return qualityLevel; }, trees, lampLights, scenePass, stepTraffic, stepPeople, stepLampLights, poseCar,
     applyTime, THREE, TIMES, hemi, sun, roadMat, cityMat, renderPipeline, people, crowd, lighting, setMode, modes, stepAvatar, stepCamera, keys, drawMini, updateStreetChips, get mode() { return mode; },
     sim(sec, held = []) {
       keys.clear();
