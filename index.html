@@ -1443,16 +1443,18 @@ function lampMeshes(T, spots) {
   lampSites.set(T, sites);
   return meshes;
 }
-// The spotlight pool: after dusk the lamps nearest the camera (and ahead of it) light the street for real.
+// The light pool: after dusk the lamps nearest the camera (and ahead of it) light the street for real.
+// Point lights, not spotlights: the clustered lighting only sorts point lights into its clusters, so each pixel
+// works out just the few lamps that reach it. Spotlights skip the clusters and every lit pixel on screen paid for
+// all 36 of them, day and night, at every quality level, in shaders so long they stalled each time one compiled.
 const LAMP_LIGHTS = 36, LAMP_LIGHT_R = 115;
 let lampLightCount = LOW_POWER ? 12 : 36;           // how many of the pool are used: set by the quality level
 const lampLights = [];
 for (let i = 0; i < LAMP_LIGHTS; i++) {
-  const spot = new THREE.SpotLight(0xffe8c2, 0, 25, 0.96, 0.82, 1.25);
-  spot.position.set(0, -1000, 0);
-  spot.target.position.set(0, -1001, 0);
-  scene.add(spot, spot.target);
-  lampLights.push(spot);
+  const lamp = new THREE.PointLight(0xffe8c2, 0, 22, 1.25);
+  lamp.position.set(0, -1000, 0);
+  scene.add(lamp);
+  lampLights.push(lamp);
 }
 const nearLamps = [];
 function stepLampLights() {
@@ -1471,14 +1473,13 @@ function stepLampLights() {
     nearLamps.sort((a, b) => a.eff - b.eff);
   }
   const cutoff = nearLamps.length > lampLightCount ? Math.min(LAMP_LIGHT_R, nearLamps[lampLightCount].eff) : LAMP_LIGHT_R;
-  lampLights.forEach((spot, i) => {
+  lampLights.forEach((lamp, i) => {
     const s = i < lampLightCount ? nearLamps[i] : null;
-    if (!s) { spot.intensity = 0; spot.position.set(0, -1000, 0); return; }
+    if (!s) { lamp.intensity = 0; lamp.position.set(0, -1000, 0); return; }
     const t = clamp((cutoff - s.eff) / (cutoff * 0.38), 0, 1);
-    spot.position.set(s.x, s.y, s.z);
-    spot.target.position.set(s.tx, s.gy, s.tz);
-    spot.target.updateMatrixWorld();
-    spot.intensity = 88 * scale * t * t * (3 - 2 * t);
+    // Just under the head and a little out over the street, where the spot used to aim.
+    lamp.position.set(s.x + (s.tx - s.x) * 0.15, s.y - 0.9, s.z + (s.tz - s.z) * 0.15);
+    lamp.intensity = 80 * scale * t * t * (3 - 2 * t);
   });
 }
 
@@ -3516,13 +3517,14 @@ resize();
    come. Like Slop New York, the 3D renders at one pixel per CSS pixel
    (the HUD stays sharp); only a fast machine with headroom goes above it.
    Below ~50 fps it steps down quickly (fewer pixels, then no reflections,
-   no tree shadows, fewer lamp lights); it steps back up only after a good
+   no tree shadows, fewer lamp lights, a coarser sun shadow); it steps back up only after a good
    while of comfortable frames, and never straight after stepping down.    */
+const SUN_MAP = sun.shadow.mapSize.x;             // NYC's size for this device (1024 on a phone)
 const QUALITY = [
-  { pr: 0.7, ssr: false, treeShadows: false, lamps: 6 },
-  { pr: LOW_POWER ? 0.85 : 1, ssr: false, treeShadows: false, lamps: 12 },
-  { pr: 1, ssr: true, treeShadows: true, lamps: 24 },
-  { pr: 1.5, ssr: true, treeShadows: true, lamps: 36 },
+  { pr: 0.7, ssr: false, treeShadows: false, lamps: 8, sunMap: Math.min(SUN_MAP, 1024) },
+  { pr: LOW_POWER ? 0.85 : 1, ssr: false, treeShadows: false, lamps: 16, sunMap: Math.min(SUN_MAP, 2048) },
+  { pr: 1, ssr: true, treeShadows: true, lamps: 24, sunMap: SUN_MAP },
+  { pr: 1.5, ssr: true, treeShadows: true, lamps: 36, sunMap: SUN_MAP },
 ];
 let qualityLevel = -1;
 function setQuality(level) {
@@ -3540,6 +3542,7 @@ function setQuality(level) {
   }
   trees.group.traverse((m) => { if (m.isMesh) m.castShadow = Q.treeShadows; });
   lampLightCount = Q.lamps;
+  sun.shadow.mapSize.set(Q.sunMap, Q.sunMap);     // the shadow atlas is resized in place: no shaders rebuilt
 }
 const START_QUALITY = LOW_POWER ? 1 : 2;
 const perf = { t: 0, n: 0, good: 0, steady: 0, holdUntil: 0, backoff: 30000, last: 0, fpsT: 0, fpsN: 0 };
