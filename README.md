@@ -19,7 +19,13 @@ Minneapolis comes from the baked city in `city/` and `tex/` (tools/mpls-drive/ba
 
 Also Minneapolis's own: `js/mpls-blocks.js` (city blocks from the street graph, for the pedestrians),
 `js/mpls-signals.js` (signal heads at the signalled corners), `js/mpls-places.js` (the places to find), and water on
-the river and lakes. Traffic is 60% of NYC's downtown and a quarter of it elsewhere (`js/mpls-traffic.js`).
+the river and lakes. Traffic is 60% of NYC's downtown and a quarter of it elsewhere, and the pedestrians all of NYC's
+downtown and half elsewhere (`js/mpls-traffic.js`). They walk the sidewalks drawn along the streets
+(`buildSidewalks` in `js/mpls-blocks.js`), stopping short of the cross streets. The car is sharper into the turns than
+NYC's cab, and Space (A on a pad, Drift on a touch screen) is a handbrake that throws it into a drift.
+
+Hero buildings (`tools/mpls-drive/heroes/`) are real buildings modelled in detail: 3800 Beard Ave S and 2905 and 2915
+Dean Parkway. `tools/mpls-drive/place_heroes.py` puts one into the baked tiles without a full re-bake.
 
 Not yet: pedestrians crossing at the crosswalks (NYC's crossings follow Manhattan's grid), and street furniture beyond
 the lamps and signals.
