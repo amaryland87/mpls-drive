@@ -1,0 +1,118 @@
+// Minneapolis's city blocks, for Slop New York's pedestrians (pedestrian-routes.js keeps each walker on one block's
+// sidewalks, and rounds its corners within a few metres of the block's curb). Manhattan's blocks come from its open
+// data; here they are the faces of the street graph (data/roads.json): every loop of streets closes a block. Each block
+// carries its outline along the street centrelines (to find the block a point is in) and its curb line, the outline
+// pulled in by each street's half width (what the sidewalks follow).
+
+const CELL = 64;
+
+/** Builds the blocks from the street graph; returns blockAt(x, z): the block there, or null on no block. */
+export function buildBlocks(graph) {
+  const N = graph.nodes.length / 2;
+  const node = (i) => ({ x: graph.nodes[i * 2], z: graph.nodes[i * 2 + 1] });
+  // Half-edges: each link both ways, with its points from its start to its end, and the street's half width
+  const half = [];
+  const out = Array.from({ length: N }, () => []);
+  for (const [a, b, , w, , , inner] of graph.links) {
+    if (a === b) continue;
+    const pts = [node(a)];
+    for (let k = 0; k < inner.length; k += 2) pts.push({ x: inner[k], z: inner[k + 1] });
+    pts.push(node(b));
+    const hw = Math.max(2.5, w / 2);
+    const h0 = { from: a, to: b, pts, hw, used: false }, h1 = { from: b, to: a, pts: [...pts].reverse(), hw, used: false };
+    h0.twin = h1; h1.twin = h0;
+    for (const h of [h0, h1]) {
+      h.angle = Math.atan2(h.pts[1].z - h.pts[0].z, h.pts[1].x - h.pts[0].x);
+      out[h.from].push(h);
+      half.push(h);
+    }
+  }
+  for (const list of out) list.sort((p, q) => p.angle - q.angle);
+  // Arriving along h, turn onto the street just before its way back in angle order: walking the faces that way keeps
+  // each block on the same side
+  const next = (h) => {
+    const list = out[h.to], k = list.indexOf(h.twin);
+    return list[(k - 1 + list.length) % list.length];
+  };
+  const faces = [];
+  for (const h0 of half) {
+    if (h0.used) continue;
+    const ring = [], widths = [];
+    let h = h0, steps = 0;
+    do {
+      h.used = true;
+      for (let k = 0; k < h.pts.length - 1; k++) { ring.push(h.pts[k]); widths.push(h.hw); }
+      h = next(h);
+    } while (h && h !== h0 && ++steps < 400);
+    if (h !== h0 || ring.length < 3) continue;
+    let area = 0;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) area += ring[j].x * ring[i].z - ring[i].x * ring[j].z;
+    faces.push({ ring, widths, area: area / 2 });
+  }
+  // The blocks are the faces wound one way; the outside of everything (and of each separate island of streets) the
+  // other. Which way is which: the way most faces go.
+  const sign = Math.sign(faces.reduce((s, f) => s + Math.sign(f.area), 0)) || 1;
+  const blocks = [];
+  for (const f of faces) {
+    const A = Math.abs(f.area);
+    if (Math.sign(f.area) !== sign || A < 200 || A > 2.5e6) continue;
+    blocks.push(makeBlock(f.ring, f.widths, sign, A));
+  }
+  // A grid of which blocks reach into each cell
+  const cells = new Map();
+  for (const b of blocks) {
+    for (let i = Math.floor(b.minX / CELL); i <= Math.floor(b.maxX / CELL); i++) {
+      for (let j = Math.floor(b.minZ / CELL); j <= Math.floor(b.maxZ / CELL); j++) {
+        const k = i * 100000 + j;
+        if (!cells.has(k)) cells.set(k, []);
+        cells.get(k).push(b);
+      }
+    }
+  }
+  for (const list of cells.values()) list.sort((p, q) => p.area - q.area);   // the smallest that holds a point wins
+  console.info(`[blocks] ${blocks.length} blocks from ${faces.length} faces of the street graph`);
+  return function blockAt(x, z) {
+    for (const b of cells.get(Math.floor(x / CELL) * 100000 + Math.floor(z / CELL)) || []) {
+      if (x < b.minX || x > b.maxX || z < b.minZ || z > b.maxZ) continue;
+      if (inside(b.outline, x, z)) return b;
+    }
+    return null;
+  };
+}
+
+function inside(P, x, z) {
+  let hit = false;
+  for (let i = 0, j = P.length - 1; i < P.length; j = i++) {
+    const a = P[i], c = P[j];
+    if ((a.z > z) !== (c.z > z) && x < ((c.x - a.x) * (z - a.z)) / (c.z - a.z) + a.x) hit = !hit;
+  }
+  return hit;
+}
+
+// A block from its outline along the centrelines: its curb line (poly) is each side pulled in by its street's half
+// width, mitred at the corners (and capped, so a sharp corner doesn't throw a spike).
+function makeBlock(ring, widths, sign, area) {
+  const n = ring.length;
+  const normals = [];
+  for (let i = 0; i < n; i++) {
+    const a = ring[i], b = ring[(i + 1) % n];
+    const dx = b.x - a.x, dz = b.z - a.z, L = Math.hypot(dx, dz) || 1;
+    // inward: to the left of the way round for one winding, the right for the other
+    normals.push({ x: (-dz / L) * sign, z: (dx / L) * sign });
+  }
+  const poly = [];
+  for (let i = 0; i < n; i++) {
+    const p = (i - 1 + n) % n;
+    const n0 = normals[p], n1 = normals[i], w0 = widths[p], w1 = widths[i];
+    let mx = n0.x * w0 + n1.x * w1, mz = n0.z * w0 + n1.z * w1;
+    const cos = n0.x * n1.x + n0.z * n1.z;
+    const k = 1 / Math.max(0.35, 1 + cos);
+    mx *= k; mz *= k;
+    const L = Math.hypot(mx, mz), cap = 2.5 * Math.max(w0, w1);
+    if (L > cap) { mx *= cap / L; mz *= cap / L; }
+    poly.push({ x: ring[i].x + mx, z: ring[i].z + mz });
+  }
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const q of ring) { minX = Math.min(minX, q.x); maxX = Math.max(maxX, q.x); minZ = Math.min(minZ, q.z); maxZ = Math.max(maxZ, q.z); }
+  return { outline: ring, poly, minX, maxX, minZ, maxZ, area, park: 0, median: false, cx: (minX + maxX) / 2, cz: (minZ + maxZ) / 2 };
+}

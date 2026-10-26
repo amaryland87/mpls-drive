@@ -41,9 +41,6 @@ import {
   step,
   smoothstep,
   dot,
-  log2,
-  dFdx,
-  dFdy,
   length,
   normalize,
   reflect,
@@ -68,15 +65,7 @@ import {
   streetZ
 } from './city-config.js';
 
-// js/tsl-materials.js
-// Photorealistic TSL (Three.js Shading Language) procedural shaders for Three.js r186 WebGPURenderer
-// Incorporating techniques from three.js webgpu_generator_city.html:
-// - Mikkelsen Surface-Gradient Hardware Derivative Bump Mapping (bumpNormal)
-// - Filter-Width Anti-Aliased Procedural Markings & Mortar (lineAA & gridLine via fwidth)
-// - True 3D Slab Ray-Marched Room & Retail Storefront Interiors (walls, ceiling lamps, floors, rugs, doors, art, shelves, curtains)
-// - Window Air-Conditioner Units with Louver Relief & Grimy Soda-Lime Window Glazing
-// - Crown-Sphere Foliage Normal Relief, Radial Interior Canopy AO & Cast-Iron Tree Grate Shading
-// - Occlusion-Aware Urban Canyon Global Illumination (aoNode + Warm Terracotta/Limestone Bounce)
+// Procedural city materials: facades and interiors, vegetation, roads, water and lighting effects.
 
 // Shared live uniforms controlled by lighting / time-of-day presets
 const cityUniforms = {
@@ -1186,9 +1175,7 @@ function createChryslerCrownMaterial() {
   return mat;
 }
 
-/**
- * GTA 6-Style Metallic Clearcoat Vehicle Paint TSL Material
- */
+// Vehicle paint with Fresnel reflections and a sharp sun highlight.
 function createCarPaintMaterial(baseHex = 0xffc218) {
   if (_carPaintCache.has(baseHex)) return _carPaintCache.get(baseHex);
   const mat = new THREE.MeshStandardNodeMaterial({
@@ -1264,10 +1251,8 @@ const TREE_WIND = vec2(0.86, 0.51);
  * (shadows follow), branches bob and leaves flutter.
  */
 function createTreeMaterial(leafAtlas) {
-  // The alpha test is given as nodes (alphaTestNode on the scene pass, maskShadowNode in the shadow maps) rather than
-  // `alphaTest`: the shadow passes copy each caster's `alphaTest` onto one shared shadow material, and every switch
-  // between 0 and > 0 bumps its version, which made three.js re-hash the node graphs of all the casters' shadow render
-  // objects every frame (~10 ms of CPU). The trees were the only alpha-tested casters.
+  // Use alpha-test nodes rather than `alphaTest`: switching that property on the shared shadow material
+  // changes its version and forces shader-cache checks for shadow casters.
   const mat = new TreeNodeMaterial({
     side: THREE.DoubleSide,
     alphaToCoverage: true,
@@ -1305,11 +1290,7 @@ function createTreeMaterial(leafAtlas) {
   })();
 
   // Coverage: leaf cards from the atlas; bark is opaque from outside (its back faces are dropped)
-  // [Mpls Drive] three.js r186's WebGPU renderer doesn't upload the atlas's coverage-keeping mip levels, so the alpha
-  // is scaled up with the mip level instead (Ben Golus's alpha-test fix), keeping far crowns as full as up close.
-  const texel = uv().mul(1024.0);
-  const mip = max(float(0.0), log2(max(dot(dFdx(texel), dFdx(texel)), dot(dFdy(texel), dFdy(texel)))).mul(0.5));
-  const alpha = mix(float(frontFacing), leaf.a.mul(mip.mul(0.25).add(1.0)), isLeaf);
+  const alpha = mix(float(frontFacing), leaf.a, isLeaf);
   mat.alphaTestNode = float(0.5);
   mat.maskShadowNode = alpha.greaterThan(0.5);
 
@@ -1487,24 +1468,30 @@ function createParkWallMaterial() {
 }
 
 /**
- * Black Cast-Iron Park Fence TSL Material for flat fence strips (alpha-tested pickets, posts & rails).
- * uv.x = metres along the fence, uv.y = 0 (ground) .. 1 (top). Sub-pixel pickets fade out with distance.
+ * Black Cast-Iron Park Fence TSL Material for flat fence strips.
+ * uv.x = metres along the fence, uv.y = 0 (ground) .. 1 (top). Filtered coverage keeps sub-pixel ironwork stable.
  */
 function createIronFenceMaterial() {
   const mat = new THREE.MeshStandardNodeMaterial({
     metalness: 0.55,
     roughness: 0.5,
-    side: THREE.DoubleSide
+    side: THREE.DoubleSide,
+    alphaToCoverage: true
   });
-  mat.alphaTest = 0.5;
 
   mat.colorNode = Fn(() => {
     const u = uv().x;
     const v = uv().y;
-    const picket = lineAA(fract(u.div(0.13)).sub(0.5), 0.1).mul(step(v, 0.985));
-    const post = lineAA(fract(u.div(2.6).add(0.5)).sub(0.5), 0.017);
-    const rails = max(lineAA(v.sub(0.9), 0.028), lineAA(v.sub(0.12), 0.022));
-    const alpha = clamp(max(max(picket, post), rails), 0.0, 1.0);
+    const fw = fwidth(uv()).max(0.0001).toVar();
+    const picketCoord = u.div(0.13);
+    const postCoord = u.div(2.6).add(0.5);
+    const picket = filteredPulse(fract(picketCoord), 0.4, 0.6, fw.x.div(0.13))
+      .mul(clamp(float(0.985).sub(v).div(fw.y).add(0.5), 0.0, 1.0));
+    const post = filteredPulse(fract(postCoord), 0.483, 0.517, fw.x.div(2.6));
+    const rails = filteredPulse(v, 0.872, 0.928, fw.y).add(filteredPulse(v, 0.098, 0.142, fw.y));
+    const vertical = clamp(picket.add(post), 0.0, 1.0);
+    // Keep fractional coverage for the multisampled scene pass; alpha testing would erase distant pickets.
+    const alpha = float(1.0).sub(float(1.0).sub(vertical).mul(float(1.0).sub(rails)));
     return vec4(color(0x171a17), alpha);
   })();
 
@@ -3016,9 +3003,10 @@ function createCarFlareMaterial() {
 }
 
 export {
+  evaluateApartmentInterior, // [Mpls] exported for Minneapolis's own facades (mpls-city.js)
   cityUniforms,
-  evaluateApartmentInterior, // [Mpls Drive] exported for its own facades
   WALL_KINDS,
+  filteredPulse,
   createCurtainWallMaterial,
   createPreWarBuildingMaterial,
   createFacadeBoxes,

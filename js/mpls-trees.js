@@ -1,10 +1,10 @@
 // Mpls Drive's tree field: the LiDAR survey's trees grown as Slop New York's procedural planes, honey locusts and
-// elms (nyc/trees.js, with NYC's own TSL tree material from nyc/tsl-materials.js), each fitted to its measured height
+// elms (trees.js, with NYC's own TSL tree material from tsl-materials.js), each fitted to its measured height
 // and spread. Trees are added and dropped a map piece at a time and regrouped by species, variant and level of detail
 // into instanced meshes that follow the camera.
 import * as THREE from 'three/webgpu';
-import { createLeafAtlas, buildTreeGeometries, TREE_SPECIES } from './nyc/trees.js';
-import { createTreeMaterial } from './nyc/tsl-materials.js';
+import { createLeafAtlas, buildTreeGeometries, TREE_SPECIES } from './trees.js';
+import { createTreeMaterial } from './tsl-materials.js';
 
 const clampN = (v, a, b) => Math.max(a, Math.min(b, v));
 function hashPos(x, y, z) {
@@ -24,11 +24,6 @@ export function createTreeField(opts = {}) {
   const group = new THREE.Group();
   group.name = 'Trees';
   const atlas = createLeafAtlas();
-  // three.js r186's WebGPU renderer ignores a DataTexture's own mip levels (NYC runs on three's dev build), so NYC's
-  // coverage-keeping levels are replaced by generated ones, and the tree material scales the leaves' alpha up with
-  // the mip level instead (nyc/tsl-materials.js, createTreeMaterial), so far crowns don't thin out.
-  atlas.texture.mipmaps = [];
-  atlas.texture.generateMipmaps = true;
   const mat = createTreeMaterial(atlas.texture);
 
   const geos = TREE_SPECIES.map((_, s) => [0, 1].map((v) => buildTreeGeometries(s, v, atlas.tileMeters)));

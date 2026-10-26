@@ -1,11 +1,11 @@
-// Minneapolis's street network for Slop New York's traffic (public/mpls-drive-next/js/road-network.js reads it as
+// Minneapolis's street network for Slop New York's traffic (public/mpls-drive/js/road-network.js reads it as
 // GEO.roadGraph): every drivable street piece of the baked tiles (public/mpls-drive/city/t/*.json, made by
 // bake_tiles.py, which cuts each street at its intersections), joined where their ends meet, and the road bridges
 // (index.json br, left out of the street pieces) joined onto them where they land.
 //
 //   node tools/mpls-drive/bake_roads.mjs
 //
-// Writes public/mpls-drive-next/data/roads.json:
+// Writes public/mpls-drive/data/roads.json:
 //   nodes  [x, z, ...] junctions and street ends, metres (x east, z south)
 //   links  [[a, b, name, width, lanes, dir, [x, z, ...inner points]], ...] dir 1 one-way a -> b, 0 two-way
 //   names  ['', ...] (the street pieces carry no names; the kind of road stands in)
@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CITY = path.join(HERE, '../../public/mpls-drive/city');
-const OUT = path.join(HERE, '../../public/mpls-drive-next/data/roads.json');
+const OUT = path.join(HERE, '../../public/mpls-drive/data/roads.json');
 
 const KINDS = ['pedestrian', 'living_street', 'residential', 'unclassified', 'tertiary_link', 'secondary_link',
   'primary_link', 'trunk_link', 'motorway_link', 'tertiary', 'secondary', 'primary', 'trunk', 'motorway', 'path'];
