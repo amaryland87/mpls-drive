@@ -116,3 +116,45 @@ function makeBlock(ring, widths, sign, area) {
   for (const q of ring) { minX = Math.min(minX, q.x); maxX = Math.max(maxX, q.x); minZ = Math.min(minZ, q.z); maxZ = Math.max(maxZ, q.z); }
   return { outline: ring, poly, minX, maxX, minZ, maxZ, area, park: 0, median: false, cx: (minX + maxX) / 2, cz: (minZ + maxZ) / 2 };
 }
+
+// The street kinds (bake_roads.mjs: 1 + the kind's index in mpls-geo.js ROAD_KINDS; 0 a road bridge) and where their
+// sidewalks run, out from the centreline past the half width, as mpls-geo.js streetGeo draws them: wide sidewalks to
+// the curb on the main streets, a grass boulevard and then the sidewalk elsewhere, none along the freeways and bridges
+const MAIN_WALK = [0.3, 3.0], WALK = [2.4, 3.9];
+const walkBand = (ni) => (ni === 0 || [8, 9, 13, 14].includes(ni) ? null : ni === 11 || ni === 12 ? MAIN_WALK : WALK);
+const WALK_CELL = 32;
+
+/** The street surfaces from the street graph; returns sidewalkAt(x, z): 'road' (on a street or its curb), 'walk' (on
+ *  a sidewalk) or null (anywhere else). */
+export function buildSidewalks(graph) {
+  const cells = new Map();
+  const node = (i) => [graph.nodes[i * 2], graph.nodes[i * 2 + 1]];
+  for (const [a, b, ni, w, , , inner] of graph.links) {
+    const pts = [node(a)];
+    for (let k = 0; k < inner.length; k += 2) pts.push([inner[k], inner[k + 1]]);
+    pts.push(node(b));
+    const hw = w / 2, band = walkBand(ni), far = hw + (band ? band[1] : 0.3);
+    for (let k = 0; k + 1 < pts.length; k++) {
+      const [ax, az] = pts[k], [bx, bz] = pts[k + 1];
+      const s = { ax, az, bx, bz, hw, band };
+      for (let i = Math.floor((Math.min(ax, bx) - far) / WALK_CELL); i <= Math.floor((Math.max(ax, bx) + far) / WALK_CELL); i++) {
+        for (let j = Math.floor((Math.min(az, bz) - far) / WALK_CELL); j <= Math.floor((Math.max(az, bz) + far) / WALK_CELL); j++) {
+          const key = i * 100000 + j;
+          if (!cells.has(key)) cells.set(key, []);
+          cells.get(key).push(s);
+        }
+      }
+    }
+  }
+  return function sidewalkAt(x, z) {
+    let walk = false;
+    for (const s of cells.get(Math.floor(x / WALK_CELL) * 100000 + Math.floor(z / WALK_CELL)) || []) {
+      const dx = s.bx - s.ax, dz = s.bz - s.az;
+      const t = Math.max(0, Math.min(1, ((x - s.ax) * dx + (z - s.az) * dz) / (dx * dx + dz * dz || 1)));
+      const d = Math.hypot(x - s.ax - dx * t, z - s.az - dz * t) - s.hw;
+      if (d < 0.3) return 'road';
+      if (s.band && d >= s.band[0] && d <= s.band[1]) walk = true;
+    }
+    return walk ? 'walk' : null;
+  };
+}

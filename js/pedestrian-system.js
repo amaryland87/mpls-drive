@@ -1,4 +1,4 @@
-import { blockAt } from './city-config.js';
+import { blockAt, pedestrianShare } from './city-config.js';
 import { ground } from './ground.js';
 import { createPedestrianRoutes } from './pedestrian-routes.js';
 import { PersonCrowd, PersonRig, PEDESTRIAN_DIVE_DURATION } from './pedestrians.js';
@@ -37,6 +37,7 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
     const hairRoll = hash(i, 2);
     peds.push({
       placed: false,
+      share: hash(i, 8), // [Mpls] walks only where pedestrianShare is above this: everyone downtown, half elsewhere
       crossesStreets: i % 6 === 0, // some start near crossings; everyone can use them along their route
       x: 0,
       z: 0,
@@ -139,6 +140,7 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
       const z = track.az + track.uz * t;
       const d = Math.hypot(x - focusX, z - focusZ);
       if (d < rMin || d > rMax || (protectView && nearView(x, z, 2, PED_SPAWN_DISTANCE))) continue;
+      if (p.share >= pedestrianShare(x, z)) continue;
       if (player.active && Math.hypot(x - player.x, z - player.z) < 10) continue;
       if (crosswalk && track.node.curb.some((q) => Math.hypot(q.x - x, q.z - z) < QUEUE_GAP)) continue;
       if (p.conversation) endConversation(p.conversation);
@@ -554,9 +556,12 @@ function createPedestrianSystem(network, { player, nearEdges, nearSignals, mayCr
       const p = peds[pedCursor];
       pedCursor = (pedCursor + 1) % NUM_PEDS;
       const d = p.placed ? Math.hypot(p.x - focusX, p.z - focusZ) : Infinity;
-      if (d <= (jump ? NEAR_RADIUS : PED_RADIUS)) continue;
+      // [Mpls] Someone who has walked out of downtown into the thinner crowd goes when out of sight
+      const thinned = p.placed && p.share >= pedestrianShare(p.x, p.z) && !p.node && !p.conversation
+        && (jump || !nearView(p.x, p.z, 2, PED_SPAWN_DISTANCE));
+      if (d <= (jump ? NEAR_RADIUS : PED_RADIUS) && !thinned) continue;
       pedBudget--;
-      spawnPed(p, jump ? 0 : 60, jump ? NEAR_RADIUS : 280, !jump);
+      if (!spawnPed(p, jump ? 0 : 60, jump ? NEAR_RADIUS : 280, !jump) && thinned) p.placed = false;
     }
     for (const p of peds) if (p.placed) avoidPlayer(p);
     meet(dt);

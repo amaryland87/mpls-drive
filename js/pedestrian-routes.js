@@ -1,3 +1,5 @@
+import { sidewalkAt } from './city-config.js';
+
 // Lazily connected sidewalk tracks; junctions stay on the same curb island. Crosswalk tracks are separate,
 // and pedestrian-system.js checks traffic permissions before entering them.
 function createPedestrianRoutes({ walkable, onSidewalk }, blockAt) {
@@ -21,10 +23,51 @@ function createPedestrianRoutes({ walkable, onSidewalk }, blockAt) {
     return true;
   }
 
+  // [Mpls] A centreline street's sidewalk lines: the drawn sidewalk's (sidewalkAt) on each side, as far along the street
+  // as the line stays on it. The street's own half width can differ from the edge's (one roadway of a divided road),
+  // and a street bends a little between its edge's ends, so the line is found by trying offsets every 0.3 m, keeping
+  // the one on the sidewalk longest, and a second one beside it; each stops short of the cross streets at either end.
+  const STEP = 1.5, MIN_RUN = 8;
+  function sidewalkLines(e, sign, result) {
+    const samples = Math.floor(e.len / STEP) + 1;
+    const runs = [];
+    for (let off = 0.5; off <= e.half + 4.5; off += 0.3) {
+      let best = null, start = -1;
+      for (let i = 0; i <= samples; i++) {
+        const t = Math.min(i * STEP, e.len);
+        const ok = i < samples && sidewalkAt(e.sx + e.dx * t + e.rx * sign * off, e.sz + e.dz * t + e.rz * sign * off) === 'walk';
+        if (ok && start < 0) start = t;
+        if (!ok && start >= 0) {
+          const end = Math.min((i - 1) * STEP, e.len);
+          if (!best || end - start > best.t1 - best.t0) best = { off, t0: start, t1: end };
+          start = -1;
+        }
+      }
+      if (best && best.t1 - best.t0 >= MIN_RUN) runs.push(best);
+    }
+    runs.sort((p, q) => (q.t1 - q.t0) - (p.t1 - p.t0));
+    const lines = [];
+    for (const run of runs) {
+      if (lines.length === 2) break;
+      if (lines.length && (Math.abs(run.off - lines[0].off) < 0.7 || Math.abs(run.off - lines[0].off) > 1.4)) continue;
+      const off = sign * run.off;
+      const a = { x: e.sx + e.dx * run.t0 + e.rx * off, z: e.sz + e.dz * run.t0 + e.rz * off };
+      const b = { x: e.sx + e.dx * run.t1 + e.rx * off, z: e.sz + e.dz * run.t1 + e.rz * off };
+      const block = blockAt(a.x, a.z);
+      if (!block || blockAt(b.x, b.z) !== block || !clear(a, b, block)) continue;
+      lines.push(run);
+      result.push(segment(a, b, { edge: e, from: e.from, to: e.to, block }));
+    }
+  }
+
   function along(e) {
     if (sidewalks.has(e)) return sidewalks.get(e);
     const result = [];
     sidewalks.set(e, result);
+    if (e.general) {
+      for (const sign of [-1, 1]) sidewalkLines(e, sign, result);
+      return result;
+    }
     // Two walking lines on each side leave room for people to pass or stop together.
     for (const sign of [-1, 1]) {
       for (const inset of [1.7, 2.8]) {
@@ -87,6 +130,7 @@ function createPedestrianRoutes({ walkable, onSidewalk }, blockAt) {
         distance = Math.min(distance, Math.hypot(x - p.x - dx * t, z - p.z - dz * t));
       }
       if (distance > 4) return false;
+      if (sidewalkAt(x, z) === 'road') return false; // [Mpls] nor out over a street's roadway
     }
     return true;
   }

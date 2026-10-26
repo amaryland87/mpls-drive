@@ -33,8 +33,11 @@ const CAR_DRIVE = {
   speed: 36, reverseSpeed: 10.5, acceleration: 4.5,
   powerSpeed: 14.5, // Above 52 km/h, engine power limits acceleration.
   rolling: 0.18, drag: 0.0012, coast: 0.6, brake: 9,
-  // [Mpls] a little sharper into the turns than NYC's cab (grip 9.5, cornering 10.5, full lock 0.60 rad)
-  wheelbase: 2.76, grip: 11, cornering: 13.5, lock: 0.68 // Wheelbase (m), tire and steering acceleration limits (m/s²).
+  // [Mpls] much sharper into the turns than NYC's cab (grip 9.5, cornering 10.5, full lock 0.60 rad)
+  wheelbase: 2.76, grip: 13.5, cornering: 18, lock: 0.74, // Wheelbase (m), tire and steering acceleration limits (m/s²).
+  // [Mpls] The handbrake (Space) locks the rear wheels: they slide, the tail comes round and the car drifts. Holding the
+  // throttle through the slide keeps it going once the handbrake is let go; steering into it straightens the car out.
+  handbrake: 4, driftGrip: 0.3, driftYaw: 1.7
 };
 const BICYCLE_DRIVE = {
   speed: 19, reverseSpeed: 4.5, acceleration: 9,
@@ -351,6 +354,7 @@ class ThirdPersonControllerManager {
       ent.prevX = ent.position.x;
       ent.prevZ = ent.position.z;
       ent.vx = ent.vz = ent.angularVel = ent.steerAngle = 0;
+      if (ent.drift !== undefined) ent.drift = 0;
       ent.pitchVel = ent.rollVel = ent.heaveY = ent.heaveVel = 0;
       ent.chassisPivot.rotation.x = ent.chassisPivot.rotation.z = 0;
       ent.chassisPivot.position.y = 0;
@@ -581,6 +585,7 @@ class ThirdPersonControllerManager {
       heaveVel: 0,
       lastCollisionSpark: null,
       steerAngle: 0,
+      drift: 0, // [Mpls] 0 gripping .. 1 sliding on the handbrake
       wheelSpin: 0,
       cameraTargetOffset: new THREE.Vector3(0, 0.96, 0),
       chaseDistance: 6.9,
@@ -1120,6 +1125,7 @@ class ThirdPersonControllerManager {
     let steerInput = 0;
     if (this.keys.left) steerInput = this.keys.left;
     if (this.keys.right) steerInput = -this.keys.right;
+    const handbrake = +this.keys.up || 0; // [Mpls]
 
     const prevX = c.position.x;
     const prevZ = c.position.z;
@@ -1129,27 +1135,36 @@ class ThirdPersonControllerManager {
     const steps = Math.ceil(dt * 120);
     const step = dt / steps;
     const steerResponse = 1 - Math.exp(-10 * step);
-    const yawResponse = 1 - Math.exp(-5 * step);
+    const yawResponse = 1 - Math.exp(-7 * step); // [Mpls] NYC's 5: the car answers the wheel quicker
     const tireResponse = 1 - Math.exp(-4 * step);
     for (let i = 0; i < steps; i++) {
       const sin = Math.sin(c.heading), cos = Math.cos(c.heading);
       const vx = sin * c.speed + c.vx, vz = cos * c.speed + c.vz;
       const forward = vx * sin + vz * cos;
       const sideways = vx * cos - vz * sin;
-      const speed = driveSpeed(forward, throttle, step, CAR_DRIVE);
+      let speed = driveSpeed(forward, throttle, step, CAR_DRIVE);
+      // [Mpls] The handbrake slows the car a little as the rear wheels slide
+      if (handbrake) speed -= Math.sign(speed) * Math.min(Math.abs(speed), CAR_DRIVE.handbrake * handbrake * step);
       const acceleration = (speed - forward) / step;
       // Braking and cornering share tire grip; air resistance does not use it.
       const tireAcceleration = acceleration + CAR_DRIVE.drag * forward * Math.abs(forward);
       const grip = Math.sqrt(Math.max(0, CAR_DRIVE.grip ** 2 - tireAcceleration ** 2));
+      // [Mpls] How far into a drift the car is: the handbrake starts one above walking pace; power keeps a slide going
+      // (throttle while the car still points well off where it travels); otherwise the tires catch it over a second
+      const slideAngle = Math.abs(Math.atan2(sideways, Math.abs(forward) + 0.5));
+      const driftTarget = Math.abs(forward) < 3 ? 0
+        : handbrake ? handbrake : throttle > 0.3 && slideAngle > 0.12 && c.drift > 0.2 ? 0.55 : 0;
+      c.drift += (driftTarget - c.drift) * (1 - Math.exp(-(driftTarget > c.drift ? 9 : 1.8) * step));
+      const yawGain = 1 + (CAR_DRIVE.driftYaw - 1) * c.drift;
 
       // Full lock at parking speeds, progressively less steering at road speeds.
       const turn = CAR_DRIVE.wheelbase * CAR_DRIVE.cornering;
       const maxSteer = Math.atan(turn / Math.max(speed * speed, turn / Math.tan(CAR_DRIVE.lock)));
       c.steerAngle += (steerInput * maxSteer - c.steerAngle) * steerResponse;
-      const yawLimit = grip / Math.max(2, Math.abs(speed));
-      const targetYaw = Math.max(-yawLimit, Math.min(yawLimit, speed * Math.tan(c.steerAngle) / CAR_DRIVE.wheelbase));
+      const yawLimit = grip / Math.max(2, Math.abs(speed)) * yawGain;
+      const targetYaw = Math.max(-yawLimit, Math.min(yawLimit, speed * Math.tan(c.steerAngle) / CAR_DRIVE.wheelbase * yawGain));
       // Collision spin remains part of the yaw velocity; the tires gradually regain control.
-      const yawStep = grip * 0.65 * step;
+      const yawStep = grip * 0.65 * yawGain * step;
       c.angularVel += Math.max(-yawStep, Math.min(yawStep, (targetYaw - c.angularVel) * yawResponse));
       c.heading += c.angularVel * step;
 
@@ -1160,7 +1175,9 @@ class ThirdPersonControllerManager {
       const worldZ = cos * speed - sin * sideways;
       c.speed = worldX * nextSin + worldZ * nextCos;
       const slip = worldX * nextCos - worldZ * nextSin;
-      const correction = Math.max(-grip * step, Math.min(grip * step, -slip * tireResponse));
+      // [Mpls] Sliding tires hold the car's sideways motion back with a fraction of their grip
+      const sideGrip = grip * (1 - (1 - CAR_DRIVE.driftGrip) * c.drift);
+      const correction = Math.max(-sideGrip * step, Math.min(sideGrip * step, -slip * tireResponse));
       c.vx = nextCos * (slip + correction);
       c.vz = -nextSin * (slip + correction);
       c.position.x += (nextSin * c.speed + c.vx) * step;

@@ -4,8 +4,8 @@
 // traffic signals, as the corners with signal heads do in NYC.
 import * as THREE from 'three/webgpu';
 import { GEO } from './nyc-geodata.js';
-import { setBlockLookup } from './city-config.js';
-import { buildBlocks } from './mpls-blocks.js';
+import { setBlockLookup, setPedestrianShare, setSidewalkLookup } from './city-config.js';
+import { buildBlocks, buildSidewalks } from './mpls-blocks.js';
 import { createTrafficSystem, setTrafficDensity } from './traffic.js';
 import { createSignals } from './mpls-signals.js';
 
@@ -18,6 +18,12 @@ function density(x, z) {
   const t = Math.min(1, Math.max(0, (d - DOWNTOWN.inner) / (DOWNTOWN.outer - DOWNTOWN.inner)));
   return DOWNTOWN_SHARE + (ELSEWHERE_SHARE - DOWNTOWN_SHARE) * t * t * (3 - 2 * t);
 }
+// The pedestrians thin out the same way: all of them downtown, half of them elsewhere
+function pedestrianShare(x, z) {
+  const d = Math.hypot(x - DOWNTOWN.x, z - DOWNTOWN.z);
+  const t = Math.min(1, Math.max(0, (d - DOWNTOWN.inner) / (DOWNTOWN.outer - DOWNTOWN.inner)));
+  return 1 - 0.5 * t * t * (3 - 2 * t);
+}
 
 // Street kinds (bake_roads.mjs names: 1 + the road kind's index in mpls-geo.js ROAD_KINDS): the arterials (secondary,
 // primary, trunk) and the collectors (tertiary)
@@ -29,6 +35,9 @@ export async function createMplsTraffic(scene, url) {
   GEO.roadGraph = graph;
   // The city blocks the pedestrians walk round
   setBlockLookup(buildBlocks(graph));
+  // ...on the sidewalks drawn along the streets (mpls-geo.js), not on the streets themselves
+  setSidewalkLookup(buildSidewalks(graph));
+  setPedestrianShare(pedestrianShare);
   // Signals where an arterial meets another arterial or a collector: three or more streets at the corner, at least one
   // of them an arterial and three of them arterials or collectors (about 500 corners, as many as Minneapolis has)
   const arterial = new Map(), main = new Map(), all = new Map();

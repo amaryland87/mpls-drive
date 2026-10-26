@@ -30,6 +30,14 @@ const BLOCKS = [];
 let blockLookup = () => null;
 const blockAt = (x, z) => blockLookup(x, z);
 function setBlockLookup(fn) { blockLookup = fn; }
+// What the ground is at a point (mpls-blocks.js buildSidewalks): 'road', 'walk' (a sidewalk) or null (anything else),
+// and the share of the pedestrians who walk there (mpls-traffic.js): all of them downtown, half elsewhere
+let sidewalkLookup = () => null;
+const sidewalkAt = (x, z) => sidewalkLookup(x, z);
+function setSidewalkLookup(fn) { sidewalkLookup = fn; }
+let pedestrianShareFn = () => 1;
+const pedestrianShare = (x, z) => pedestrianShareFn(x, z);
+function setPedestrianShare(fn) { pedestrianShareFn = fn; }
 // The road network (road-network.js) comes from Minneapolis's street centrelines alone, with no Manhattan grid.
 const ALL_AVENUES = [];
 const ALL_STREETS = [];
@@ -170,6 +178,10 @@ export {
   streetZ,
   blockAt,
   setBlockLookup,
+  sidewalkAt,
+  setSidewalkLookup,
+  pedestrianShare,
+  setPedestrianShare,
   setCity,
   nearestCorner,
   shortName,
