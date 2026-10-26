@@ -29,7 +29,8 @@ The map (see area.py) is cut into 1 km tiles. For each tile i_j this writes
     jn intersections [x*10, z*10, radius*10]
     cw crosswalks  [x*10, z*10, angle of the street*100, street width*10]
     hx hero buildings, modelled in detail by hero_house.py (see there); they replace the ordinary
-                   buildings, houses, garages and trees inside their outline
+                   buildings, houses, garages and trees inside their outline (and the houses, garages
+                   and trees under their walks and drives: clear)
 and for the whole map
   index.json   bounds, palettes, bridges and the main-street routes traffic drives;
                bridges are deck pieces [ax, az, bx, bz, width, height at a*10, height at b*10, pier at a]
@@ -954,9 +955,9 @@ def tile_data(x, z):
 heroes = [json.load(open(p)) for p in sorted(glob.glob(os.path.join(HERE, 'heroes', '*.json')))]
 
 
-def in_hero(x, z):
+def in_hero(x, z, clear=False):
     for hero in heroes:
-        for ring in hero['rings']:
+        for ring in hero['rings'] + (hero.get('clear', []) if clear else []):
             inside = False
             for (ax, az), (bx_, bz_) in zip(ring, ring[1:] + ring[:1]):
                 if (az > z) != (bz_ > z) and x < ax + (z - az) * (bx_ - ax) / (bz_ - az):
@@ -969,11 +970,11 @@ def in_hero(x, z):
 if heroes:
     n0 = len(solids) + len(houses) + len(boxes) + len(trees)
     solids = [s for s in solids if not in_hero(s['cx'], s['cz'])]
-    houses = [h for h in houses if not in_hero(h[0], h[1])]
-    boxes = [b for b in boxes if not in_hero(b[0], b[1])]
-    trees = [t for t in trees if not in_hero(t[0], t[1])]
+    houses = [h for h in houses if not in_hero(h[0], h[1], True)]
+    boxes = [b for b in boxes if not in_hero(b[0], b[1], True)]
+    trees = [t for t in trees if not in_hero(t[0], t[1], True)]
     for hero in heroes:
-        tile_data(hero['x'], hero['z'])['hx'].append({k: v for k, v in hero.items() if k != 'name'})
+        tile_data(hero['x'], hero['z'])['hx'].append({k: v for k, v in hero.items() if k not in ('name', 'clear')})
     print('hero buildings', [h['name'] for h in heroes], 'replaced', n0 - len(solids) - len(houses) - len(boxes) - len(trees), flush=True)
 
 for s in solids:
