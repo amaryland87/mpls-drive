@@ -21,7 +21,9 @@ draws.
 Without street photos, the rest is what such buildings have: house numbers on the entrance canopies; blinds, shades,
 curtains and the odd air conditioner in the windows (seeded, so the same every time); and round the back a door with
 a stoop and a light, a steel fire escape, downspouts from the roof, gas and electric meters, bins and a dumpster.
-Cars stand parked in the lot's stalls and along the parkway's curb on the buildings' side (pk: drawn by the game's
+The lawn in front follows the aerial photo: dark asphalt paths from the entrances to the parkway's sidewalk (2905's
+forking, with a branch curving away to the south-west), a concrete walk along the fronts, clipped round shrubs, squared
+hedges and two benches. Cars stand parked in the lot's stalls and along the parkway's curb on the buildings' side (pk: drawn by the game's
 mpls-parked.js with its own car models).
 """
 import gzip, json, math, os, random, sys
@@ -52,6 +54,16 @@ GARAGE = 121034879        # 2905's garage
 IRON = '#2a2c2f'          # the fire escapes
 SHADES = ['#f1efe8', '#e8dfc9', '#d9cbb0', '#fbfaf6', '#cfc6b8']
 CURTAINS = ['#8a3b32', '#3f5a6e', '#d8cfb8', '#6b7a52', '#efe9dc', '#5b4a6e']
+FEET = {}                 # the foot of each building's front steps, (x, z), as the models are made
+PATH = '#56595c'          # the dark asphalt paths across the lawn
+GREENS = ['#3d5c33', '#46663a', '#37532f', '#4b6b3c']
+# The lawn in front, from the 2022 aerial photo (traced on a 5 m grid): clipped round shrubs (x, z, radius), squared
+# hedge blocks (x0, x1, z0, z1) and benches (x, z), long side east-west
+SHRUBS = [(-4483.0, 1695.0, 1.4), (-4481.9, 1697.1, 1.2), (-4484.5, 1700.6, 1.3), (-4467.9, 1695.6, 1.1),
+          (-4467.9, 1697.7, 1.0), (-4477.0, 1704.0, 0.9), (-4476.2, 1705.5, 0.8), (-4472.2, 1712.2, 0.6),
+          (-4471.5, 1724.8, 1.1), (-4474.0, 1688.8, 1.2)]
+HEDGES = [(-4475.0, -4471.8, 1698.2, 1702.0), (-4473.7, -4469.5, 1704.4, 1709.4), (-4469.3, -4466.0, 1723.1, 1728.0)]
+BENCHES = [(-4474.0, 1690.8), (-4474.0, 1694.2)]
 PARKED = []               # parked cars: [x, z, heading, body (0 sedan 1 SUV), paint]; they go in 2905's record
 
 # House numbers: 3 x 5 blocks a digit
@@ -436,12 +448,10 @@ def model(name, way, brick, roof_col, pent):
             for side in (-1, 1):
                 ss = s + side * 1.3
                 M.poly([P(w, ss, base, 0), P(w, ss, base, o1), P(w, ss, sill - 0.68, o1), P(w, ss, sill, 1.4), P(w, ss, sill, 0)], L['concPlain'], CONCRETE)
-            # the front walk: straight out from the steps, then across the lawn to the parkway's sidewalk
-            foot = P(w, s, 0, o1 - 0.1)[::2]
+            # the paths from the steps across the lawn come with the landscaping (landscape(), below)
+            FEET[name] = P(w, s, 0, o1 - 0.1)[::2]
             out = P(w, s, 0, o1 + 4)[::2]
-            end = nearest_line(*out, lambda hw, walk: walk)
-            drape([foot, out, end], 1.5, L['sidewalk'], WALK, 0.1)
-            walk_end = end
+            end = nearest_line(out[0] - 8, out[1], lambda hw, walk: walk)
             curb_cars(*out, 30, rng, lambda x, z: math.hypot(x - end[0], z - end[1]) < 3.5 or math.hypot(x + 4506, z - 1689) < 9)
 
     # The roof behind the parapet, and the parapet's inside face
@@ -467,10 +477,96 @@ def model(name, way, brick, roof_col, pent):
     rings = [ring]
     if name == '2905-dean':
         rings.append(garage(M, ground, brick, drape, drape_rect))
+    if len(FEET) == len(BUILDINGS):
+        landscape(M, ground, drape, clear)
     rec = M.record(name, cx, cz, PENTHOUSE, rings)
     rec['clear'] = [[[round(a, 2), round(b, 2)] for a, b in r] for r in clear]
-    print(name, len(M.tris), 'triangles; front walk meets the sidewalk at', [round(v, 1) for v in walk_end])
+    print(name, len(M.tris), 'triangles')
     return rec
+
+
+def bezier(a, c, b, n=10):
+    """A quadratic curve from a to b pulled toward c, as n + 1 points."""
+    return [((1 - t) ** 2 * a[0] + 2 * (1 - t) * t * c[0] + t * t * b[0], (1 - t) ** 2 * a[1] + 2 * (1 - t) * t * c[1] + t * t * b[1])
+            for t in (k / n for k in range(n + 1))]
+
+
+def landscape(M, ground, drape, clear):
+    """The lawn between the fronts and the parkway, as the aerial photo has it (see SHRUBS above): a concrete walk
+    along the fronts from the parking area to 2915, dark paths from the entrances to the parkway's sidewalk (2905's
+    straight out with a branch curving off to the south-west, 2915's short and straight), shrubs, hedges, benches."""
+    f1, f2 = FEET['2905-dean'], FEET['2915-dean']
+    print('steps at', [round(v, 1) for v in f1], [round(v, 1) for v in f2])
+    sidewalk = lambda x, z: nearest_line(x, z, lambda hw, walk: walk)
+    paths = []                              # (points, half width), to keep the planting off them
+
+    def path(pts, width, layer, colour, lift):
+        drape(pts, width, layer, colour, lift)
+        paths.append((pts, width / 2))
+    # 2905: straight west, and the branch
+    path([f1, (f1[0] - 12, f1[1]), sidewalk(f1[0] - 24, f1[1] - 1)], 1.8, L['asphalt'], PATH, 0.1)
+    fork = (f1[0] - 7.5, f1[1] + 0.5)
+    path(bezier(fork, (f1[0] - 12.5, f1[1] + 1.5), sidewalk(f1[0] - 15, f1[1] + 12), 12), 1.6, L['asphalt'], PATH, 0.1)
+    # 2915: west to the sidewalk
+    path([f2, (f2[0] - 4, f2[1]), sidewalk(f2[0] - 9, f2[1])], 1.8, L['asphalt'], PATH, 0.1)
+    # the concrete walk along the fronts, past the foot of each flight of steps
+    x1, x2 = f1[0] - 0.85, f2[0] - 0.85
+    path([(x1, 1685.5), (x1, f1[1]), (x1, 1718.5)] + bezier((x1, 1718.5), (x1, 1721.5), (x2, 1723.5), 6)[1:] + [(x2, f2[1] + 3.5)],
+         1.6, L['sidewalk'], WALK, 0.11)
+
+    def clear_of_paths(x, z, r):
+        """(x, z) moved, if it must be, so that a round thing of radius r there keeps 0.3 m off every path."""
+        for _ in range(3):
+            for pts, hw in paths:
+                for (ax, az), (bx, bz) in zip(pts, pts[1:]):
+                    dx, dz = bx - ax, bz - az
+                    t = max(0, min(1, ((x - ax) * dx + (z - az) * dz) / (dx * dx + dz * dz or 1)))
+                    px, pz = ax + dx * t, az + dz * t
+                    d, need = math.hypot(x - px, z - pz), r + hw + 0.3
+                    if d < need:
+                        ux, uz = ((x - px) / d, (z - pz) / d) if d > 1e-6 else (-dz, dx)
+                        x, z = px + ux * need, pz + uz * need
+        return x, z
+    # Shrubs: low faceted domes, a little squashed
+    rng = random.Random('dean-lawn')
+    for x, z, r in SHRUBS:
+        x, z = clear_of_paths(x, z, r)
+        g, h, col = ground(x, z), r * rng.uniform(1.0, 1.3), rng.choice(GREENS)
+        ring_pts = []
+        for k, (rr, yy) in enumerate([(0.75, 0.0), (1.0, 0.35), (0.92, 0.7), (0.62, 0.95), (0.0, 1.0)]):
+            ring_pts.append([(x + math.cos(t) * r * rr, g + yy * h, z + math.sin(t) * r * rr) for t in (j * math.pi / 5 for j in range(10))])
+        for lo, hi in zip(ring_pts, ring_pts[1:]):
+            for j in range(10):
+                q = [lo[j], lo[(j + 1) % 10], hi[(j + 1) % 10], hi[j]]
+                if q[2] == q[3]:
+                    M.poly(q[:3], L['grass'], col)
+                else:
+                    M.poly(q, L['grass'], col)
+        clear.append([(x - r, z - r), (x + r, z - r), (x + r, z + r), (x - r, z + r)])
+    # Hedges: clipped blocks with chamfered tops, kept off the walk
+    for x0, x1_, z0, z1 in HEDGES:
+        x1_ = min(x1_, min(x1, x2) - 1.2)
+        # a block too near a path moves off it whole
+        mx, mz = clear_of_paths((x0 + x1_) / 2, (z0 + z1) / 2, math.hypot(x1_ - x0, z1 - z0) / 2 * 0.8)
+        dx_, dz_ = mx - (x0 + x1_) / 2, mz - (z0 + z1) / 2
+        x0, x1_, z0, z1 = x0 + dx_, x1_ + dx_, z0 + dz_, z1 + dz_
+        g = min(ground(x0, z0), ground(x1_, z0), ground(x1_, z1), ground(x0, z1))
+        h, col, i = rng.uniform(1.2, 1.5), rng.choice(GREENS), 0.2
+        lo = [(x0, z0), (x1_, z0), (x1_, z1), (x0, z1)]
+        hi = [(x0 + i, z0 + i), (x1_ - i, z0 + i), (x1_ - i, z1 - i), (x0 + i, z1 - i)]
+        for a, b, c, d in zip(lo, lo[1:] + lo[:1], hi[1:] + hi[:1], hi):
+            M.poly([(a[0], g - 0.1, a[1]), (b[0], g - 0.1, b[1]), (b[0], g + h - 0.25, b[1]), (a[0], g + h - 0.25, a[1])], L['grass'], col)
+            M.poly([(a[0], g + h - 0.25, a[1]), (b[0], g + h - 0.25, b[1]), (c[0], g + h, c[1]), (d[0], g + h, d[1])], L['grass'], col)
+        M.poly([(p[0], g + h, p[1]) for p in hi], L['grass'], col)
+        clear.append(lo)
+    # Benches: a slatted seat and back on iron ends
+    for x, z in BENCHES:
+        x, z = clear_of_paths(x, z, 0.9)
+        g = ground(x, z)
+        M.box(x - 0.8, x + 0.8, g + 0.42, g + 0.47, z - 0.22, z + 0.22, L['concPlain'], '#7a5a3a')
+        M.box(x - 0.8, x + 0.8, g + 0.6, g + 0.85, z + 0.2, z + 0.25, L['concPlain'], '#7a5a3a')
+        for e in (-0.7, 0.7):
+            M.box(x + e - 0.03, x + e + 0.03, g, g + 0.85, z - 0.22, z + 0.25, L['metal'], IRON)
 
 
 def garage(M, ground, brick, drape, drape_rect):
