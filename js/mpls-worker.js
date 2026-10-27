@@ -111,6 +111,7 @@ async function loadTile({ key, x0, z0, tile, small }) {
     type: 'tile', key, image, surface, ground: groundGrid(x0, z0, tile), water: waterArrays(surface, SURF_N, x0, z0, tile), pieces: built.pieces, solids: built.solids, stadium: built.stadium,
     corners: built.corners, streetNames: built.streetNames, mapImage: mapImage(built.map, x0, z0, tile),
     signs: atlas && { image: atlas.image, rows: atlas.rows },
+    parked: Float32Array.from((data.hx || []).flatMap((h) => (h.pk || []).flat())),   // mpls-parked.js
   };
 }
 
