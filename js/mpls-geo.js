@@ -674,6 +674,13 @@ function heroGeo(G, S, hx) {
     const a = ring[i], b = ring[(i + 1) % ring.length];
     S.add(a[0], a[1], b[0], b[1], 0, base + hx.top);
   }
+  // its parked cars (mpls-parked.js) are solid too: a 4.6 x 1.85 m box each
+  for (const [x, z, yaw] of hx.pk || []) {
+    const s = Math.sin(yaw), c = Math.cos(yaw), top = groundH(x, z) + 1.5;
+    const corner = (f, r) => [x + s * f + c * r, z + c * f - s * r];
+    const q = [corner(2.3, 0.92), corner(2.3, -0.92), corner(-2.3, -0.92), corner(-2.3, 0.92)];
+    for (let k = 0; k < 4; k++) S.add(q[k][0], q[k][1], q[(k + 1) % 4][0], q[(k + 1) % 4][1], 0, top);
+  }
   const cols = hx.col.map(color), p = hx.p, uv = hx.uv;
   G.y0 = base; G.foot = 0;
   const P = (k) => [p[k * 3] / 100, p[k * 3 + 1] / 100, p[k * 3 + 2] / 100], U = (k) => [uv[k * 2] / 100, uv[k * 2 + 1] / 100];

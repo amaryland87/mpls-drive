@@ -17,6 +17,7 @@ import { decodeGround, setGround, groundH, bridgeList, bridgeHeightAt, bridgeArr
 import { createTreeField } from './mpls-trees.js';
 import { createStadium } from './mpls-stadium.js';
 import { ground as sharedGround } from './ground.js';
+import { createParkedCars } from './mpls-parked.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const SURF_N = 512;
@@ -380,6 +381,7 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
   const root = new THREE.Group();
   root.name = 'Minneapolis';
   scene.add(root);
+  const parked = createParkedCars(root);
   const tiles = new Map();          // 'i_j' -> tile, while loading or loaded
   const ready = [];                 // loaded tiles
   let loading = 0;
@@ -501,6 +503,7 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
       for (const m of createStadium({ ring, base: y, foot: lo - y < -0.05 ? lo - y - 0.15 : 0, night: stadiumNight, castShadow: !lowPower })) t.objects.push(m);
     }
     root.add(g, ...t.objects);
+    if (msg.parked?.length) parked.add(t.key, msg.parked);
     t.ready = true;
     ready.push(t);
   }
@@ -557,6 +560,7 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
     for (const P of t.pieces) if (P.built) dropDetail(P);
     t.signTex?.dispose();
     t.signMat?.dispose();
+    parked.remove(t.key);
     t.objects = t.pieces = t.surface = t.solids = t.colliders = null;
   }
 

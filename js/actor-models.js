@@ -993,8 +993,9 @@ function carPlateTexture() {
  * Every mask is built once and shared by the colour, roughness, metalness & emissive graphs (TSL turns nodes used
  * more than once into temporaries), so the fragment shader evaluates each SDF a single time.
  */
-function createLoftedCarMaterial(spec, fixedColorHex = null) {
-  const cacheKey = `${spec.name}_${fixedColorHex ?? 'instanced'}`;
+function createLoftedCarMaterial(spec, fixedColorHex = null, parked = false) {
+  // [Mpls] parked: lamps dark (mpls-parked.js)
+  const cacheKey = `${spec.name}_${fixedColorHex ?? 'instanced'}${parked ? '_parked' : ''}`;
   if (_carMaterialCache.has(cacheKey)) {
     return _carMaterialCache.get(cacheKey);
   }
@@ -1272,7 +1273,7 @@ function createLoftedCarMaterial(spec, fixedColorHex = null) {
   // ---- Emissive: running, brake, reverse & turn lights, CHMSL, taxi roof light -----------------------------------
   const brake = state.x;
   const blink = max(state.y.mul(step(0.0, p.x)), state.z.mul(step(p.x, 0.0)));
-  const nightHeadlamp = smoothstep(0.60, 1.15, cityUniforms.uInteriorGlow);
+  const nightHeadlamp = parked ? float(0) : smoothstep(0.60, 1.15, cityUniforms.uInteriorGlow);
   const headlamps = color(0xfff8ec)
     .mul(headlightLens.mul(2.2).add(drl.mul(0.65)))
     .mul(nightHeadlamp)

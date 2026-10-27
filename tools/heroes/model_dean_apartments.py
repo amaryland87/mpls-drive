@@ -17,8 +17,14 @@ from a ramp and a parking lot that a drive joins to the parkway. A concrete walk
 front steps across the lawn to the parkway's sidewalk. Everything on the ground follows the game's own ground
 (city/ground.bin, as mpls-geo.js groundH has it), so walks, steps and drives meet the streets and sidewalks the game
 draws.
+
+Without street photos, the rest is what such buildings have: house numbers on the entrance canopies; blinds, shades,
+curtains and the odd air conditioner in the windows (seeded, so the same every time); and round the back a door with
+a stoop and a light, a steel fire escape, downspouts from the roof, gas and electric meters, bins and a dumpster.
+Cars stand parked in the lot's stalls and along the parkway's curb on the buildings' side (pk: drawn by the game's
+mpls-parked.js with its own car models).
 """
-import gzip, json, math, os, sys
+import gzip, json, math, os, random, sys
 
 import numpy as np
 
@@ -43,6 +49,15 @@ CONCRETE = '#b9b4aa'
 WALK = '#eceae4'          # as the game's sidewalks (mpls-geo.js)
 ASPHALT = '#8d9194'       # as the game's local streets
 GARAGE = 121034879        # 2905's garage
+IRON = '#2a2c2f'          # the fire escapes
+SHADES = ['#f1efe8', '#e8dfc9', '#d9cbb0', '#fbfaf6', '#cfc6b8']
+CURTAINS = ['#8a3b32', '#3f5a6e', '#d8cfb8', '#6b7a52', '#efe9dc', '#5b4a6e']
+PARKED = []               # parked cars: [x, z, heading, body (0 sedan 1 SUV), paint]; they go in 2905's record
+
+# House numbers: 3 x 5 blocks a digit
+GLYPHS = {'0': '111101101101111', '1': '010110010010111', '2': '111001111100111', '3': '111001111001111',
+          '4': '101101111001001', '5': '111100111001111', '6': '111100111101111', '7': '111001010010010',
+          '8': '111101111101111', '9': '111101111001111'}
 
 BUILDINGS = {
     # name: OSM way, brick tint (multiplied over the red brick layer), roof colour, the penthouse (x0, x1, z0, z1)
@@ -134,6 +149,51 @@ def strip(pts, width):
         L_ = math.hypot(dx, dz) or 1
         out.append(((x - dz / L_ * width / 2, z + dx / L_ * width / 2), (x + dz / L_ * width / 2, z - dx / L_ * width / 2)))
     return out
+
+
+def draw_number(panel, s, y, text, px, off, colour='#2f2a24'):
+    """A house number in blocks of px on a wall (panel(s0, s1, y0, y1, off, layer, colour)), centred s along it,
+    reading left to right from outside: s runs to the left of someone facing the wall."""
+    width = (len(text) * 4 - 1) * px
+    for i, ch in enumerate(text):
+        for r_ in range(5):
+            for c_ in range(3):
+                if GLYPHS[ch][r_ * 3 + c_] == '1':
+                    xr = -width / 2 + (i * 4 + c_) * px
+                    yy = y + (4 - r_) * px
+                    panel(s - xr - px, s - xr, yy, yy + px, off, L['concPlain'], colour)
+
+
+def park(x, z, hx, hz, rng):
+    """A car parked at (x, z) facing (hx, hz)."""
+    PARKED.append([round(x, 2), round(z, 2), round(math.atan2(hx, hz), 3), int(rng.random() < 0.4), rng.randrange(10)])
+
+
+def curb_cars(cx, cz, reach, rng, keep_clear):
+    """Cars parked along the curb of the nearest street on (cx, cz)'s side, every 6.6 m within reach of it, with
+    gaps, and none where keep_clear says (a drive or a walk)."""
+    best = None
+    for hw, walk, pts in streets(cx, cz):
+        d = min(math.hypot(x - cx, z - cz) for x, z in pts)
+        if best is None or d < best[0]:
+            best = (d, hw, pts)
+    _, hw, pts = best
+    run = 0.0
+    for (ax, az), (bx, bz) in zip(pts, pts[1:]):
+        L_ = math.hypot(bx - ax, bz - az)
+        if L_ < 0.1:
+            continue
+        ux, uz = (bx - ax) / L_, (bz - az) / L_
+        rx, rz = -uz, ux                                # right of the way it runs (road-network.js: rx = -dz, rz = dx)
+        side = 1 if (cx - ax) * rx + (cz - az) * rz > 0 else -1
+        t = (6.6 - run) % 6.6
+        while t < L_:
+            off = (hw - 0.92) * side                    # its outer side just inside the curb
+            x, z = ax + ux * t + rx * off, az + uz * t + rz * off
+            if math.hypot(x - cx, z - cz) < reach and not keep_clear(x, z) and rng.random() < 0.7:
+                park(x, z, ux * side, uz * side, rng)   # facing the way that side's lane runs
+            t += 6.6
+        run = (run + L_) % 6.6
 
 
 def triangulate(ring):
@@ -233,8 +293,85 @@ def model(name, way, brick, roof_col, pent):
             for y in (y0, y1):
                 M.poly([P(w, s0, y, off - depth), P(w, s1, y, off - depth), P(w, s1, y, off), P(w, s0, y, off)], layer, colour)
 
-    # The front: the westmost wall long enough for a doorway, with the ground falling to the parkway before it
+    def wbox(w, s0, s1, y0, y1, o0, o1, layer, colour):
+        """A box set square on a wall: s0..s1 along it, y0..y1 up, o0..o1 out from it."""
+        c = [(s0, o0), (s1, o0), (s1, o1), (s0, o1)]
+        for (sa, oa), (sb, ob) in zip(c, c[1:] + c[:1]):
+            M.poly([P(w, sa, y0, oa), P(w, sb, y0, ob), P(w, sb, y1, ob), P(w, sa, y1, oa)], layer, colour)
+        M.poly([P(w, sa, y1, oa) for sa, oa in c], layer, colour)
+
+    rng = random.Random(name)
+
+    def dress(w, s, sill, h, upper):
+        """What's in a window: a blind or shade part way down, curtains, or nothing; now and then an air conditioner."""
+        r = rng.random()
+        if r < 0.5:
+            drop = h * rng.choice((0.15, 0.3, 0.5, 0.7, 0.95))
+            panel(w, s - 0.46, s + 0.46, sill + h - drop, sill + h, 0.078, L['concPlain'], rng.choice(SHADES))
+        elif r < 0.72:
+            c, gap = rng.choice(CURTAINS), rng.choice((0.0, 0.2, 0.35))
+            panel(w, s - 0.46, s - gap, sill + 0.05, sill + h, 0.078, L['concPlain'], c)
+            panel(w, s + gap, s + 0.46, sill + 0.05, sill + h, 0.078, L['concPlain'], c)
+        if upper and rng.random() < 0.08:
+            wbox(w, s - 0.32, s + 0.32, sill, sill + 0.42, 0.0, 0.5, L['metal'], '#cfd0cc')
+            panel(w, s - 0.27, s + 0.27, sill + 0.06, sill + 0.36, 0.505, L['metal'], '#9ea2a3')
+
+    def number(w, s, y, text, px, off):
+        draw_number(lambda s0, s1, y0, y1, o, layer, c: panel(w, s0, s1, y0, y1, o, layer, c), s, y, text, px, off)
+
+    def back(w, sd, sf):
+        """The back: a door with a stoop and a light, meters, bins and a dumpster, a fire escape up the wall."""
+        g = ground(*P(w, sd, 0, 1.0)[::2])
+        wbox(w, sd - 0.9, sd + 0.9, base, g + 0.3, 0.0, 1.3, L['concPlain'], CONCRETE)       # the stoop
+        panel(w, sd - 0.5, sd + 0.5, g + 0.3, g + 2.4, 0.05, L['concPlain'], '#5b4636')
+        panel(w, sd - 0.62, sd + 0.62, g + 2.4, g + 2.55, 0.06, L['concPlain'], STONE)
+        wbox(w, sd - 0.1, sd + 0.1, g + 2.65, g + 2.9, 0.0, 0.2, L['concPlain'], '#20242a')   # the light
+        for k in range(6):                                                                  # gas and electric
+            sm = sd + 1.4 + (k % 3) * 0.32
+            wbox(w, sm - 0.12, sm + 0.12, g + 0.9 + (k // 3) * 0.45, g + 1.2 + (k // 3) * 0.45, 0.0, 0.14, L['metal'], '#b3b6b2')
+        wbox(w, sd + 1.25, sd + 2.25, g + 0.75, g + 0.8, 0.0, 0.08, L['metal'], '#8a8d8a')
+        drape([P(w, sd, 0, 0.5)[::2], P(w, sd, 0, 4.0)[::2]], 3.2, L['sidewalk'], WALK, 0.06)  # a slab out the back
+        for k, c in enumerate(('#2b2d30', '#2b2d30', '#2d5aa0')):                           # bins
+            sb = sd - 1.5 - k * 0.75
+            gb = ground(*P(w, sb, 0, 1.6)[::2]) + 0.06
+            wbox(w, sb - 0.3, sb + 0.3, gb, gb + 0.95, 1.25, 1.95, L['metal'], c)
+            wbox(w, sb - 0.33, sb + 0.33, gb + 0.95, gb + 1.02, 1.2, 2.0, L['metal'], c)
+        sx = sd + 3.4
+        gx = ground(*P(w, sx, 0, 2.5)[::2]) + 0.06
+        wbox(w, sx - 0.95, sx + 0.95, gx, gx + 1.15, 1.8, 3.1, L['metal'], '#2f5a3a')          # the dumpster
+        wbox(w, sx - 1.0, sx + 1.0, gx + 1.15, gx + 1.25, 1.75, 3.15, L['metal'], '#26472f')
+        # The fire escape: a railed landing at each upper floor, steep stairs between, a ladder down from the first
+        for k in (1, 2, 3):
+            y = FLOORS[k] + 0.3
+            wbox(w, sf - 1.3, sf + 1.3, y - 0.06, y, 0.05, 1.15, L['metal'], IRON)
+            for s_ in (sf - 1.3, sf + 1.3):
+                wbox(w, s_ - 0.03, s_ + 0.03, y, y + 1.0, 0.05, 1.15, L['metal'], IRON)
+            wbox(w, sf - 1.3, sf + 1.3, y + 0.96, y + 1.02, 1.09, 1.15, L['metal'], IRON)
+            wbox(w, sf - 1.3, sf + 1.3, y + 0.46, y + 0.5, 1.11, 1.15, L['metal'], IRON)
+            for j in range(9):
+                s_ = sf - 1.3 + j * 2.6 / 8
+                wbox(w, s_ - 0.015, s_ + 0.015, y, y + 1.0, 1.11, 1.14, L['metal'], IRON)
+            if k > 1:                       # stairs from this landing down to the one below, against the railing
+                y0 = FLOORS[k - 1] + 0.3
+                for o0, o1 in ((0.55, 0.6), (1.0, 1.05)):
+                    M.poly([P(w, sf - 1.15, y0, o0), P(w, sf + 1.15, y - 0.06, o0), P(w, sf + 1.15, y - 0.06, o1), P(w, sf - 1.15, y0, o1)], L['metal'], IRON)
+                    M.poly([P(w, sf - 1.15, y0 + 0.2, o0), P(w, sf + 1.15, y + 0.14, o0), P(w, sf + 1.15, y - 0.06, o0), P(w, sf - 1.15, y0, o0)], L['metal'], IRON)
+                for j in range(1, 12):
+                    t = j / 12
+                    s_ = sf - 1.15 + 2.3 * t
+                    yy = y0 + (y - 0.06 - y0) * t
+                    M.poly([P(w, s_ - 0.09, yy, 0.6), P(w, s_ + 0.09, yy, 0.6), P(w, s_ + 0.09, yy, 1.0), P(w, s_ - 0.09, yy, 1.0)], L['metal'], IRON)
+        yl = FLOORS[1] + 0.3                 # the drop ladder, hung up out of reach
+        for s_ in (sf + 0.75, sf + 1.15):
+            wbox(w, s_ - 0.025, s_ + 0.025, yl - 2.6, yl, 0.95, 1.0, L['metal'], IRON)
+        for j in range(8):
+            yy = yl - 0.3 - j * 0.3
+            wbox(w, sf + 0.75, sf + 1.15, yy - 0.02, yy, 0.96, 0.99, L['metal'], IRON)
+
+    # The front: the westmost wall long enough for a doorway, with the ground falling to the parkway before it;
+    # the back: the longest east wall
     front = min((w for w in walls if w[5] < -0.9 and w[2] > 2.2), key=lambda w: (w[0][0] + w[1][0]) / 2)
+    rear = max((w for w in walls if w[5] > 0.9), key=lambda w: w[2])
     for w in walls:
         a, b, Lw, ux, uz, nx, nz = w
         # belt courses: over the garden storey, under the top storey's sills, and the cornice under the coping
@@ -243,20 +380,38 @@ def model(name, way, brick, roof_col, pent):
         # a pale base course along the ground
         g0 = min(ground(*P(w, 0, 0)[::2]), ground(*P(w, Lw, 0)[::2]))
         panel(w, 0, Lw, base, g0 + 0.35, 0.03, L['concPlain'], CONCRETE)
+        # downspouts at the ends of the long walls but the front, from a scupper under the coping
+        if w is not front and Lw > 8:
+            for sp in (0.45, Lw - 0.45):
+                gs = ground(*P(w, sp, 0, 0.3)[::2])
+                wbox(w, sp - 0.06, sp + 0.06, gs, PARAPET - 0.55, 0.02, 0.14, L['metal'], '#8a8f93')
+                wbox(w, sp - 0.16, sp + 0.16, PARAPET - 0.75, PARAPET - 0.5, 0.0, 0.2, L['metal'], '#8a8f93')
+                wbox(w, sp - 0.1, sp + 0.1, gs, gs + 0.08, 0.14, 0.55, L['concPlain'], CONCRETE)   # splash block
         # windows, a whole number of bays across, clear of the corners
         n = int((Lw - 1.2) // BAY)
         if n < 1:
             continue
         door_bay = n // 2 if w is front else -1
+        fire_bay = max(0, n // 2 - 2) if w is rear else -1
+        if w is rear:
+            back(w, Lw / 2 + (n // 2 - (n - 1) / 2) * BAY, Lw / 2 + (fire_bay - (n - 1) / 2) * BAY)
+            back_door = n // 2
+        else:
+            back_door = -1
         for q in range(n):
             s = Lw / 2 + (q - (n - 1) / 2) * BAY
             for k, f in enumerate(FLOORS):
                 sill = f + (1.25 if k == 0 else 0.9)
-                if k == 0 and (q == door_bay or sill < ground(*P(w, s, 0, 0.5)[::2]) + 0.25):
+                if k == 0 and (q in (door_bay, back_door) or sill < ground(*P(w, s, 0, 0.5)[::2]) + 0.25):
                     continue
                 h = 1.0 if k == 0 else 1.55
+                if w is rear and q == fire_bay and k >= 1:
+                    # the fire escape's landing: a steel door onto it in place of the window
+                    panel(w, s - 0.48, s + 0.48, f + 0.35, f + 2.45, 0.05, L['metal'], '#55595e')
+                    continue
                 M.window(lambda s_, y, off=0.0: P(w, s_, y, off), s, sill, 0.95, h, frame=FRAME, glass=GLASS)
                 panel(w, s - 0.62, s + 0.62, sill - 0.2, sill - 0.08, 0.1, L['concPlain'], STONE, depth=0.1)   # the sill
+                dress(w, s, sill, h, k >= 1)
         if door_bay >= 0:
             s = Lw / 2 + (door_bay - (n - 1) / 2) * BAY
             g = ground(*P(w, s, 0, 3.0)[::2])
@@ -268,8 +423,9 @@ def model(name, way, brick, roof_col, pent):
             panel(w, s - 0.6, s + 0.6, sill + 2.35, sill + 2.85, 0.1, L['glass'], GLASS)
             for side in (-1, 1):
                 panel(w, s + side * 1.25 - 0.1, s + side * 1.25 + 0.1, sill + 1.9, sill + 2.3, 0.2, L['concPlain'], '#20242a', depth=0.1)
-            # a flat canopy over it
-            panel(w, s - 1.15, s + 1.15, sill + 3.0, sill + 3.15, 1.3, L['concPlain'], STONE, depth=1.3)
+            # a flat canopy over it, the house number on its front
+            panel(w, s - 1.15, s + 1.15, sill + 2.95, sill + 3.3, 1.3, L['concPlain'], STONE, depth=1.3)
+            number(w, s, sill + 3.02, name.split('-')[0], 0.044, 1.31)
             # steps down to the walk: a landing at the door, then steps of 17 cm
             M.poly([P(w, s - 1.3, sill, 0), P(w, s + 1.3, sill, 0), P(w, s + 1.3, sill, 1.4), P(w, s - 1.3, sill, 1.4)], L['concPlain'], CONCRETE)
             for k in range(4):
@@ -286,6 +442,7 @@ def model(name, way, brick, roof_col, pent):
             end = nearest_line(*out, lambda hw, walk: walk)
             drape([foot, out, end], 1.5, L['sidewalk'], WALK, 0.1)
             walk_end = end
+            curb_cars(*out, 30, rng, lambda x, z: math.hypot(x - end[0], z - end[1]) < 3.5 or math.hypot(x + 4506, z - 1689) < 9)
 
     # The roof behind the parapet, and the parapet's inside face
     inner = offset(ring, 0.3)
@@ -312,8 +469,8 @@ def model(name, way, brick, roof_col, pent):
         rings.append(garage(M, ground, brick, drape, drape_rect))
     rec = M.record(name, cx, cz, PENTHOUSE, rings)
     rec['clear'] = [[[round(a, 2), round(b, 2)] for a, b in r] for r in clear]
-    json.dump(rec, open(os.path.join(HERE, name + '.json'), 'w'), separators=(',', ':'))
-    print('wrote', name, len(M.tris), 'triangles; front walk meets the sidewalk at', [round(v, 1) for v in walk_end])
+    print(name, len(M.tris), 'triangles; front walk meets the sidewalk at', [round(v, 1) for v in walk_end])
+    return rec
 
 
 def garage(M, ground, brick, drape, drape_rect):
@@ -349,6 +506,7 @@ def garage(M, ground, brick, drape, drape_rect):
     panel(west, sd - 2.9, sd + 2.9, g, g + 2.75, 0.04, L['concPlain'], STONE)
     panel(west, sd - 2.7, sd + 2.7, g, g + 2.55, 0.06, L['garageDoor'], '#ecebe6')
     panel(west, sd - 3.0, sd + 3.0, g + 2.75, g + 3.0, 0.1, L['concPlain'], STONE)
+    draw_number(lambda s0, s1, y0, y1, o, layer, c: panel(west, s0, s1, y0, y1, o, layer, c), sd, g + 2.79, '2901', 0.036, 0.11)
     sm = sd + (4.6 if b[1] > a[1] else -4.6)
     gm = ground(*P(west, sm, 0, 1.0)[::2])
     panel(west, sm - 0.5, sm + 0.5, gm, gm + 2.15, 0.05, L['metal'], '#5f6468')
@@ -374,6 +532,10 @@ def garage(M, ground, brick, drape, drape_rect):
     for k in range(11):
         x = -4490.0 + 2.8 * k
         drape([(x, 1665.8), (x, 1671.0)], 0.12, L['paint'], '#f4f4f0', 0.1)
+    rng = random.Random('2901-dean')
+    for k in range(10):                     # nose in to the stalls, facing north
+        if rng.random() < 0.65:
+            park(-4490.0 + 2.8 * k + 1.4, 1668.7, 0.0, -1.0, rng)
     start = (-4490.0, 1674.0)
     bend = (-4497.0, 1681.0)
     end = nearest_line(*bend, lambda hw, walk: hw - 0.6)
@@ -381,5 +543,8 @@ def garage(M, ground, brick, drape, drape_rect):
     return ring
 
 
-for name, args in BUILDINGS.items():
-    model(name, *args)
+records = {name: model(name, *args) for name, args in BUILDINGS.items()}
+records['2905-dean']['pk'] = PARKED              # all the cars go with one building, so each is drawn once
+for name, rec in records.items():
+    json.dump(rec, open(os.path.join(HERE, name + '.json'), 'w'), separators=(',', ':'))
+print(len(PARKED), 'parked cars')

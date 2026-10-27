@@ -25,7 +25,9 @@ downtown and half elsewhere (`js/mpls-traffic.js`). They walk the sidewalks draw
 NYC's cab, and Space (A on a pad, Drift on a touch screen) is a handbrake that throws it into a drift.
 
 Hero buildings (`tools/mpls-drive/heroes/`) are real buildings modelled in detail: 3800 Beard Ave S and 2905 and 2915
-Dean Parkway (with 2905's garage and lot, and front walks out to the parkway's sidewalk). `tools/mpls-drive/place_heroes.py` puts one into the baked tiles without a full re-bake.
+Dean Parkway (with 2905's garage and lot, front walks out to the parkway's sidewalk, house numbers, dressed windows,
+fire escapes and the rest round the back). Cars a hero lists (`pk`) stand parked there, drawn by `js/mpls-parked.js`
+with the traffic's own car models, lamps dark, and solid. `tools/mpls-drive/place_heroes.py` puts one into the baked tiles without a full re-bake.
 
 Not yet: pedestrians crossing at the crosswalks (NYC's crossings follow Manhattan's grid), and street furniture beyond
 the lamps and signals.
