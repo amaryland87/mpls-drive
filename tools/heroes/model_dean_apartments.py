@@ -1,4 +1,6 @@
-"""2905 and 2915 Dean Parkway, modelled by hand: run it to (re)write heroes/2905-dean.json and heroes/2915-dean.json.
+"""2905 and 2915 Dean Parkway, modelled by hand: run it to (re)write heroes/2905-dean.json and heroes/2915-dean.json,
+and the grounds of the Calhoun Beach Club next door (heroes/calhoun-beach-club-grounds.json; the Club itself and its
+apartment towers are hero_massing.py's).
 
     ../.venv/bin/python model_dean_apartments.py
 
@@ -32,7 +34,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from hero_kit import L, Mesh
+from hero_kit import L, Mesh, game_ground
 from footprints import m
 
 CACHE = os.path.join(os.path.dirname(HERE), 'osm-cache')
@@ -90,28 +92,7 @@ def osm_ring(way):
     sys.exit(f'way {way} not in osm-cache/bld_all.json')
 
 
-def game_ground():
-    """groundH(x, z) from the baked city: the ground the game draws everything on, in metres."""
-    idx = json.load(open(os.path.join(CITY, 'index.json')))
-    gr, (x0, _, z0, _) = idx['gr'], idx['bounds']
-    raw = open(os.path.join(CITY, 'ground.bin'), 'rb').read()
-    if raw[:2] == b'\x1f\x8b':
-        raw = gzip.decompress(raw)
-    H = np.cumsum(np.frombuffer(raw, '<i2').reshape(gr['nz'], gr['nx']).astype(np.int64), axis=1).ravel() / 100.0
-    nx, nz, step = gr['nx'], gr['nz'], gr['step']
-
-    def gh(x, z):
-        fx = min(max((x - x0) / step, 0), nx - 1.001)
-        fz = min(max((z - z0) / step, 0), nz - 1.001)
-        i, j = int(fx), int(fz)
-        u, v, k = fx - i, fz - j, j * nx + i
-        if u + v <= 1:
-            return H[k] + (H[k + 1] - H[k]) * u + (H[k + nx] - H[k]) * v
-        return H[k + nx + 1] + (H[k + nx] - H[k + nx + 1]) * (1 - u) + (H[k + 1] - H[k + nx + 1]) * (1 - v)
-    return gh
-
-
-GH = game_ground()
+GH = game_ground(CITY)
 
 
 def streets(x, z):
@@ -639,7 +620,61 @@ def garage(M, ground, brick, drape, drape_rect):
     return ring
 
 
+def beach_club_grounds():
+    """The Calhoun Beach Club's grounds next door (its building is hero_massing.py's): the walk along the fronts
+    going on south from 2915 to the paved terrace at the Club's west door, a walk curving to it from the parkway's
+    sidewalk, and the hedged flower bed between its south plaza and Lake Street's sidewalk, as the aerial has them."""
+    cx, cz = -4458.0, 1790.0
+    g_c = GH(cx, cz)
+    ground = lambda x, z: GH(x, z) - g_c
+    M = Mesh()
+    clear = []
+
+    def drape(pts, width, layer, colour, lift):
+        sides = strip(pts, width)
+        for (l0, r0), (l1, r1) in zip(sides, sides[1:]):
+            M.poly([(q[0], ground(*q) + lift, q[1]) for q in (l0, l1, r1, r0)], layer, colour)
+            clear.append([l0, l1, r1, r0])
+
+    f2 = FEET['2915-dean']
+    x2 = f2[0] - 0.85
+    xw = -4463.6                             # a metre off the Club's west wall
+    drape([(x2, f2[1] + 3.4), (x2, 1745.0)] + bezier((x2, 1745.0), (x2, 1749.5), (xw, 1752.0), 6)[1:] + [(xw, 1778.0)],
+          1.6, L['sidewalk'], WALK, 0.11)
+    # the terrace at the west door, in a paler paving, on a grid of 2 m
+    x0, x1, z0, z1 = -4466.5, -4462.2, 1777.5, 1789.0
+    for a in range(int((x1 - x0) // 2) + 1):
+        for b in range(int((z1 - z0) // 2) + 1):
+            xa, xb = x0 + a * 2, min(x1, x0 + a * 2 + 2)
+            za, zb = z0 + b * 2, min(z1, z0 + b * 2 + 2)
+            if xb - xa < 0.05 or zb - za < 0.05:
+                continue
+            M.poly([(x, ground(x, z) + 0.13, z) for x, z in ((xa, za), (xb, za), (xb, zb), (xa, zb))], L['sidewalk'], '#d9d3c7')
+    clear.append([(x0, z0), (x1, z0), (x1, z1), (x0, z1)])
+    # the walk curving in to it from the parkway's sidewalk
+    start = nearest_line(-4472.0, 1778.0, lambda hw, walk: walk)
+    drape(bezier(start, (-4468.5, 1777.5), (-4466.2, 1783.5), 10), 1.8, L['sidewalk'], WALK, 0.11)
+    # the flower bed: a low clipped hedge round it, flowers inside
+    bx0, bx1, bz0, bz1 = -4450.0, -4435.0, 1819.0, 1825.0
+    gb = min(ground(bx0, bz0), ground(bx1, bz0), ground(bx1, bz1), ground(bx0, bz1))
+    rng = random.Random('cbc-bed')
+    for (ax, az), (bx, bz) in (((bx0, bz0), (bx1, bz0)), ((bx1, bz0), (bx1, bz1)), ((bx1, bz1), (bx0, bz1)), ((bx0, bz1), (bx0, bz0))):
+        xa, xb, za, zb = min(ax, bx) - 0.3, max(ax, bx) + 0.3, min(az, bz) - 0.3, max(az, bz) + 0.3
+        M.box(xa, xb, gb - 0.1, gb + 0.55, za, zb, L['grass'], GREENS[1])
+    for k in range(int((bx1 - bx0 - 0.6) / 0.8)):
+        for j in range(int((bz1 - bz0 - 0.6) / 0.8)):
+            x, z = bx0 + 0.7 + k * 0.8, bz0 + 0.7 + j * 0.8
+            M.box(x - 0.3, x + 0.3, gb - 0.05, gb + rng.uniform(0.25, 0.4), z - 0.3, z + 0.3, L['grass'],
+                  rng.choice(['#b04a6a', '#d77a3a', '#e3c34a', '#9a5fb0', '#46663a', '#46663a']))
+    clear.append([(bx0, bz0), (bx1, bz0), (bx1, bz1), (bx0, bz1)])
+    rec = M.record('calhoun-beach-club-grounds', cx, cz, 1.0, [])
+    rec['clear'] = [[[round(a, 2), round(b, 2)] for a, b in r] for r in clear]
+    print('calhoun-beach-club-grounds', len(M.tris), 'triangles')
+    return rec
+
+
 records = {name: model(name, *args) for name, args in BUILDINGS.items()}
+records['calhoun-beach-club-grounds'] = beach_club_grounds()
 records['2905-dean']['pk'] = PARKED              # all the cars go with one building, so each is drawn once
 for name, rec in records.items():
     json.dump(rec, open(os.path.join(HERE, name + '.json'), 'w'), separators=(',', ':'))

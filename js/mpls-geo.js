@@ -822,6 +822,73 @@ export function buildTile(x0, z0, tile, data, isStadium) {
 }
 
 /**
+ * [Mpls] The survey's trees where the game draws something else under them. On water (wetAt: the tile map's lake and
+ * river blue) or under a bridge deck it would grow up through, a tree goes. Standing on a sidewalk (sidewalkAt, from
+ * mpls-blocks.js buildSidewalks: the whole street graph's), it moves onto the grass (grassAt) nearest the walk: the
+ * boulevard between walk and curb on a residential street, else the lawn behind the walk (else the boulevard anyway);
+ * on a main street with no grass either side it stands in a tree pit by the curb. On a trail it moves to beside it. One that would still end
+ * up on a street goes. Rewrites data.t for the tile at (x0, z0); bridges is bridgeList()'s.
+ */
+export function fitTrees(data, x0, z0, tile, { wetAt, grassAt, sidewalkAt, bridges }) {
+  const CELL = 16, cells = new Map();
+  for (const r of data.rd || []) {
+    if (ROAD_KINDS[r[0]] !== 'path') continue;
+    const hw = r[1] / 20, n = r[6];
+    for (let k = 0; k + 1 < n; k++) {
+      const s = { ax: r[7 + k * 2] / 10, az: r[8 + k * 2] / 10, bx: r[9 + k * 2] / 10, bz: r[10 + k * 2] / 10, hw };
+      const m = hw + 2;
+      for (let i = Math.floor((Math.min(s.ax, s.bx) - m) / CELL); i <= Math.floor((Math.max(s.ax, s.bx) + m) / CELL); i++) {
+        for (let j = Math.floor((Math.min(s.az, s.bz) - m) / CELL); j <= Math.floor((Math.max(s.az, s.bz) + m) / CELL); j++) {
+          const key = i * 100000 + j;
+          if (!cells.has(key)) cells.set(key, []);
+          cells.get(key).push(s);
+        }
+      }
+    }
+  }
+  const decks = bridges.filter((br) => {
+    const bx = br.ax + br.ux * br.L, bz = br.az + br.uz * br.L, m = br.w / 2 + 2;
+    return Math.max(br.ax, bx) + m > x0 && Math.min(br.ax, bx) - m < x0 + tile && Math.max(br.az, bz) + m > z0 && Math.min(br.az, bz) - m < z0 + tile;
+  });
+  const underDeck = (x, z) => decks.some((br) => {
+    const dx = x - br.ax, dz = z - br.az, t = dx * br.ux + dz * br.uz;
+    return t > -2 && t < br.L + 2 && Math.abs(-dx * br.uz + dz * br.ux) < br.w / 2 + 1.5;
+  });
+  const out = [];
+  let moved = 0, gone = 0;
+  for (let i = 0; i < data.t.length; i += 4) {
+    let x = data.t[i] / 10, z = data.t[i + 1] / 10;
+    if (wetAt(x, z) || underDeck(x, z)) { gone++; continue; }
+    const w = sidewalkAt.walkOf(x, z);
+    if (w && w.r > 1e-3) {
+      const ux = (x - w.px) / w.r, uz = (z - w.pz) / w.r;
+      const at = (d) => [w.px + ux * (w.hw + d), w.pz + uz * (w.hw + d)];
+      const spots = (w.main ? [3.6, 4.6] : [1.35, 4.6]).map(at).filter(([px, pz]) => !sidewalkAt(px, pz));
+      const spot = spots.find(([px, pz]) => grassAt(px, pz)) || (w.main ? null : spots[0]);
+      if (spot) [x, z] = spot;
+      else if (w.main) [x, z] = at(0.9);
+      else { gone++; continue; }
+      moved++;
+    }
+    for (const s of cells.get(Math.floor(x / CELL) * 100000 + Math.floor(z / CELL)) || []) {
+      const dx = s.bx - s.ax, dz = s.bz - s.az, L2 = dx * dx + dz * dz || 1;
+      const t = Math.max(0, Math.min(1, ((x - s.ax) * dx + (z - s.az) * dz) / L2));
+      const px = s.ax + dx * t, pz = s.az + dz * t, r = Math.hypot(x - px, z - pz);
+      if (r - s.hw < 0.3 && r > 1e-3) {
+        x = px + (x - px) / r * (s.hw + 0.9);
+        z = pz + (z - pz) / r * (s.hw + 0.9);
+        moved++;
+      }
+    }
+    const x10 = Math.round(x * 10), z10 = Math.round(z * 10);
+    if (sidewalkAt(x10 / 10, z10 / 10) === 'road') { gone++; continue; }
+    out.push(x10, z10, data.t[i + 2], data.t[i + 3]);
+  }
+  data.t = out;
+  return { moved, gone };
+}
+
+/**
  * What the maps draw of a tile (mpls-map.js): roads as [kind, width, n, x, z, ...] and footprints (buildings, houses,
  * garages) as [n, x, z, ...], flat.
  */

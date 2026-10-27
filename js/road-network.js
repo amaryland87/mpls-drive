@@ -19,6 +19,7 @@ const CELL = 32;
 const Z_MIN = Math.floor(ISLAND_BOUNDS.minZ) - 20; // the detailed island, ~129th St to the Battery
 const Z_MAX = Math.ceil(ISLAND_BOUNDS.maxZ) + 20;
 const LANE_CLEAR = 1.2; // half width each lane keeps free of obstacles
+const CURVE_TOL = 0.6; // [Mpls] how far a centreline street may stray from a straight run of its lanes (4b)
 const CROSSWALK = 2.5; // depth between an intersection box and its stop lines
 const SHORE_MARGIN = 6;
 
@@ -403,10 +404,20 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
       const B = junction(find(l.b));
       if (A === B) continue;
       const pts = [{ x: A.x, z: A.z }, ...l.pts.slice(1, -1), { x: B.x, z: B.z }];
-      // stations along it: the ends and every bend over 12° at least 15 m from the last station and from the far end
+      // stations along it: the ends and every bend over 12° at least 15 m from the last station and from the far end,
+      // [Mpls] and, on a gentle curve, wherever going straight on to the next point would leave the street more than
+      // CURVE_TOL off the straight run (at least 9 m from the last station and the far end): Minneapolis's parkways
+      // and ramps curve for hundreds of metres without one bend of 12°, and traffic drove across their lawns
       const stations = [A];
       let last = pts[0];
+      let lastK = 0;
       let rest = l.len;
+      const offChord = (k1) => {
+        const q = pts[k1], dx = q.x - last.x, dz = q.z - last.z, L = Math.hypot(dx, dz) || 1;
+        let far = 0;
+        for (let k = lastK + 1; k < k1; k++) far = Math.max(far, Math.abs((pts[k].x - last.x) * dz - (pts[k].z - last.z) * dx) / L);
+        return far;
+      };
       for (let k = 1; k < pts.length - 1; k++) {
         const p1 = pts[k];
         const p2 = pts[k + 1];
@@ -414,11 +425,14 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
         rest -= Math.hypot(p1.x - pts[k - 1].x, p1.z - pts[k - 1].z);
         let turn = Math.abs(Math.atan2(p2.z - p1.z, p2.x - p1.x) - Math.atan2(p1.z - last.z, p1.x - last.x));
         if (turn > Math.PI) turn = 2 * Math.PI - turn;
-        if (turn < 12 * DEG || d0 < 15 || rest < 15) continue;
+        const bend = turn >= 12 * DEG && d0 >= 15 && rest >= 15;
+        const curve = d0 >= 9 && rest >= 9 && offChord(k + 1) > CURVE_TOL;
+        if (!bend && !curve) continue;
         const s = { x: p1.x, z: p1.z, hx: 0, hz: 0, signal: false, in: [], out: [], general: true, shape: true };
         nodes.push(s);
         stations.push(s);
         last = p1;
+        lastK = k;
       }
       stations.push(B);
       const lanes = lanesOf(l);
@@ -581,7 +595,11 @@ function buildRoadNetwork(sidewalks, obstacles, signalIntersections = []) {
       }
     }
     for (const [e, other] of partner) {
-      e.lanes = e.cand.map((o) => o - e.cand[0] + 1.8).filter((o) => laneOpen(e.x0, e.z0, e.dx, e.dz, e.span, o));
+      // [Mpls] keeping to its own roadway: roadways mapped side by side, well apart (Hiawatha Ave), aren't one drawn
+      // twice, and lanes moved right past its own curb would run off the street
+      const own = e.half;
+      const right = e.cand.map((o) => o - e.cand[0] + 1.8);
+      e.lanes = right.filter((o, k) => (k === 0 || o <= own - 1.0) && laneOpen(e.x0, e.z0, e.dx, e.dz, e.span, o));
       e.half += other;
       if (e.half >= 7.25) e.axis = 'ave'; // as wide as a major road (see lanesOf)
       e.divided = true;

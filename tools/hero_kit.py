@@ -8,7 +8,9 @@ Texture coordinates are worked out for you: every flat piece is mapped in its ow
 divided by the size of one tile of its layer, so brick courses, siding and shingles run level and
 keep their real scale wherever they are.
 """
-import json, math
+import gzip, json, math, os
+
+import numpy as np
 
 # Facade texture layers, and the metres one tile of each covers (the game's LAYER and LAYER_M).
 L = dict(brickRed=0, brickLite=1, concRibbon=2, glass=3, storefront=4, sidingWin=5, siding=6, garageDoor=7,
@@ -172,3 +174,25 @@ class Mesh:
     def write(self, path, *args):
         json.dump(self.record(*args), open(path, 'w'), separators=(',', ':'))
         print('wrote', path, len(self.tris), 'triangles')
+
+
+def game_ground(city):
+    """groundH(x, z) from the baked city (public/mpls-drive/city): the ground the game draws everything on, in metres
+    (mpls-geo.js groundH)."""
+    idx = json.load(open(os.path.join(city, 'index.json')))
+    gr, (x0, _, z0, _) = idx['gr'], idx['bounds']
+    raw = open(os.path.join(city, 'ground.bin'), 'rb').read()
+    if raw[:2] == b'\x1f\x8b':
+        raw = gzip.decompress(raw)
+    H = np.cumsum(np.frombuffer(raw, '<i2').reshape(gr['nz'], gr['nx']).astype(np.int64), axis=1).ravel() / 100.0
+    nx, nz, step = gr['nx'], gr['nz'], gr['step']
+
+    def gh(x, z):
+        fx = min(max((x - x0) / step, 0), nx - 1.001)
+        fz = min(max((z - z0) / step, 0), nz - 1.001)
+        i, j = int(fx), int(fz)
+        u, v, k = fx - i, fz - j, j * nx + i
+        if u + v <= 1:
+            return H[k] + (H[k + 1] - H[k]) * u + (H[k + nx] - H[k]) * v
+        return H[k + nx + 1] + (H[k + nx] - H[k + nx + 1]) * (1 - u) + (H[k + 1] - H[k + nx + 1]) * (1 - v)
+    return gh
