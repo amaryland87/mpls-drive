@@ -24,8 +24,14 @@ downtown and half elsewhere (`js/mpls-traffic.js`). They walk the sidewalks draw
 (`buildSidewalks` in `js/mpls-blocks.js`), stopping short of the cross streets. The car is sharper into the turns than
 NYC's cab, and Space (A on a pad, Drift on a touch screen) is a handbrake that throws it into a drift.
 
-Hero buildings (`tools/mpls-drive/heroes/`) are real buildings modelled in detail: 3800 Beard Ave S and 2905 and 2915
-Dean Parkway (with 2905's garage and lot, front walks out to the parkway's sidewalk, house numbers, dressed windows,
+Traffic keeps to the streets: a centreline street's lanes run in straight pieces no more than 0.6 m off its curve
+(`js/road-network.js`, CURVE_TOL), and divided roads mapped as two roadways keep each way's lanes on its own. The trees
+stand on the grass: `fitTrees` (`js/mpls-geo.js`) takes them off water and out from under bridge decks, and off the
+sidewalks onto the boulevard or the lawn behind (or a tree pit at the curb on a main street with no grass).
+
+Hero buildings (`tools/mpls-drive/heroes/`) are real buildings modelled in detail: 3800 Beard Ave S, 2905 and 2915
+Dean Parkway, and next door the Calhoun Beach Club and its apartment towers (`tools/mpls-drive/hero_massing.py`, for
+big stepped buildings, from the LiDAR and the aerial photo) with the Club's grounds (with 2905's garage and lot, front walks out to the parkway's sidewalk, house numbers, dressed windows,
 fire escapes and the rest round the back). Cars a hero lists (`pk`) stand parked there, drawn by `js/mpls-parked.js`
 with the traffic's own car models, lamps dark, and solid. `tools/mpls-drive/place_heroes.py` puts one into the baked tiles without a full re-bake.
 

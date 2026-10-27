@@ -49,6 +49,7 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
     type: 'init', base: new URL(base, location.href).href,
     ground: { ...ground, h: ground.h.slice() },
     palette: { walls: index.walls, houseWall: index.houseWall, houseRoof: index.houseRoof, boxWall: index.boxWall },
+    bridges: index.br,
   });
 
   /* ------------------------------- Materials ------------------------------- */

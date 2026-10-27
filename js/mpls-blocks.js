@@ -146,7 +146,7 @@ export function buildSidewalks(graph) {
       }
     }
   }
-  return function sidewalkAt(x, z) {
+  function sidewalkAt(x, z) {
     let walk = false;
     for (const s of cells.get(Math.floor(x / WALK_CELL) * 100000 + Math.floor(z / WALK_CELL)) || []) {
       const dx = s.bx - s.ax, dz = s.bz - s.az;
@@ -156,5 +156,18 @@ export function buildSidewalks(graph) {
       if (s.band && d >= s.band[0] && d <= s.band[1]) walk = true;
     }
     return walk ? 'walk' : null;
+  }
+  /** The sidewalk (x, z) is on: { hw, main (a main street's, to the curb), px, pz (the nearest point of the street's
+   *  centreline), r (how far from it) }, or null. */
+  sidewalkAt.walkOf = (x, z) => {
+    for (const s of cells.get(Math.floor(x / WALK_CELL) * 100000 + Math.floor(z / WALK_CELL)) || []) {
+      if (!s.band) continue;
+      const dx = s.bx - s.ax, dz = s.bz - s.az;
+      const t = Math.max(0, Math.min(1, ((x - s.ax) * dx + (z - s.az) * dz) / (dx * dx + dz * dz || 1)));
+      const px = s.ax + dx * t, pz = s.az + dz * t, r = Math.hypot(x - px, z - pz);
+      if (r - s.hw >= s.band[0] && r - s.hw <= s.band[1]) return { hw: s.hw, main: s.band === MAIN_WALK, px, pz, r };
+    }
+    return null;
   };
+  return sidewalkAt;
 }

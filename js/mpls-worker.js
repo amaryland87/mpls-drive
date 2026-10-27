@@ -2,10 +2,13 @@
 // for a tile, this fetches its data and map image, builds its big buildings, collision and surface map, and sends
 // them back as transferable typed arrays; then, piece by piece as the camera comes near, the houses, streets, lamps
 // and trees. The page (mpls-city.js) only wraps the arrays in geometries.
-import { setGround, setPalette, buildTile, buildDetail, groundGrid, waterArrays, cityXZ, ROAD_KINDS } from './mpls-geo.js';
+import { setGround, setPalette, buildTile, buildDetail, groundGrid, waterArrays, cityXZ, ROAD_KINDS, fitTrees, bridgeList } from './mpls-geo.js';
+import { buildSidewalks } from './mpls-blocks.js';
 
 const tiles = new Map();       // key -> { raw: piece -> detail records, atlas }
 let base = '';
+let bridges = [];               // [Mpls] the decks and the streets' sidewalks, for putting the trees on the grass (fitTrees)
+let sidewalks = null;
 let stadiumXZ = [0, 0];
 const isStadium = (b, x, z) => b[2] >= 700 && Math.hypot(x - stadiumXZ[0], z - stadiumXZ[1]) < 150;
 
@@ -43,15 +46,17 @@ function signAtlas(names) {
   return { image: c.transferToImageBitmap(), lens, rows: names.length };
 }
 
-// Each tile's map is read back once into a grid, about 2 m a cell: 0 grass, 1 pavement, 2 deep water.
+// Each tile's map is read back once into a grid, about 2 m a cell: 0 grass, 1 pavement, 2 deep water. [Mpls] And
+// which cells are any water at all (wet: the shallows too, which read as pavement above), for the trees.
 const SURF_N = 512;
-function readSurface(bitmap) {
+function readSurface(bitmap, wet) {
   const c = new OffscreenCanvas(SURF_N, SURF_N), g = c.getContext('2d', { willReadFrequently: true });
   g.drawImage(bitmap, 0, 0, SURF_N, SURF_N);
   const d = g.getImageData(0, 0, SURF_N, SURF_N).data;
   const surface = new Uint8Array(SURF_N * SURF_N);
   for (let i = 0; i < SURF_N * SURF_N; i++) {
     const r = d[i * 4], gg = d[i * 4 + 1], b = d[i * 4 + 2];
+    wet[i] = b > r + 40 && b > gg + 10 ? 1 : 0;
     if (b - r > 112 && b > gg + 30) surface[i] = 2;
     else if (gg > r + 18 && gg > b + 24) surface[i] = 0;
     else surface[i] = 1;
@@ -103,7 +108,11 @@ async function loadTile({ key, x0, z0, tile, small }) {
     fetch(url + (small ? '-s.jpg' : '.jpg')).then((r) => { if (!r.ok) throw new Error('image ' + key + ': ' + r.status); return r.blob(); }),
   ]);
   const image = await createImageBitmap(blob);
-  const surface = readSurface(image);
+  const wet = new Uint8Array(SURF_N * SURF_N);
+  const surface = readSurface(image, wet);
+  const cell = (v, o) => Math.min(SURF_N - 1, Math.max(0, Math.floor((v - o) / tile * SURF_N)));
+  const at = (x, z) => cell(z, z0) * SURF_N + cell(x, x0);
+  fitTrees(data, x0, z0, tile, { wetAt: (x, z) => wet[at(x, z)] === 1, grassAt: (x, z) => surface[at(x, z)] === 0, sidewalkAt: await sidewalks, bridges });
   const built = buildTile(x0, z0, tile, data, isStadium);
   const atlas = data.sn.length ? signAtlas(data.sn) : null;
   tiles.set(key, { raw: built.raw, atlas });
@@ -121,6 +130,9 @@ self.onmessage = async ({ data: msg }) => {
       base = msg.base;
       setGround(msg.ground);
       setPalette(msg.palette);
+      bridges = bridgeList(msg.bridges || []);
+      sidewalks = fetch(new URL('../data/roads.json', base)).then((r) => r.json()).then(buildSidewalks)
+        .catch(() => Object.assign(() => null, { walkOf: () => null }));
       stadiumXZ = cityXZ(44.97372, -93.25748);
       return;
     }
