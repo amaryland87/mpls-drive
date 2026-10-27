@@ -5,7 +5,8 @@ but the city is Slop New York's, copied from commit `be65d0a`: the main loop, th
 cameras, the traffic, the sound, the HUD and the CSS. Changes to those files are marked `[Mpls]`. three.js is pinned to
 one commit of its dev branch (index.html, js/mpls-shapeutils.js).
 
-Minneapolis comes from the baked city in `city/` and `tex/` (tools/mpls-drive/bake_tiles.py, make_textures.py):
+Minneapolis comes from the baked city in `city/` and `tex/` (tools/mpls-drive/bake_tiles.py, make_textures.py; the
+OpenStreetMap extract comes from Geofabrik, or OpenStreetMap France's US Midwest one where Geofabrik can't be reached):
 
 - `js/mpls-geo.js`: Mpls Drive's city builder (buildings, houses, streets, lamps, bridges, collision), with no three.js
   objects, so it runs in `js/mpls-worker.js`. Tiles are built off the main thread; the page only wraps the arrays.
@@ -35,7 +36,25 @@ big stepped buildings, from the LiDAR and the aerial photo) with the Club's grou
 fire escapes and the rest round the back). Cars a hero lists (`pk`) stand parked there, drawn by `js/mpls-parked.js`
 with the traffic's own car models, lamps dark, and solid. `tools/mpls-drive/place_heroes.py` puts one into the baked tiles without a full re-bake.
 
-Not yet: pedestrians crossing at the crosswalks (NYC's crossings follow Manhattan's grid), and street furniture beyond
-the lamps and signals.
+Dressed from the city's own records (`tools/mpls-drive/fetch_city.py`, `bake_transit.py`):
+
+- Houses have the walls the City of Minneapolis assessor lists for their parcel (clapboard, stucco, brick or cedar
+  shakes, new texture layers in `tex/`), its roof type (gable or hip), its storeys, and front porches and chimneys as
+  often as houses of its year have them. Every roof, houses' and garages' shingles and the big buildings' flat roofs
+  alike, takes its colour from Hennepin County's 2022 aerial photo.
+- Street lights stand where the city's 18,000-odd lights are, each as its fixture: cobra heads, the residential lanterns,
+  acorns, downtown's teardrops, shoeboxes, the Loring Greenway's globes. Streets with none of the city's lights near
+  (Xcel Energy owns those, and they aren't in its data) keep evenly spaced cobra heads.
+- Traffic signals are at the corners OpenStreetMap has them (`data/roads.json` signals).
+- Street furniture (`mpls-geo.js` furnitureGeo): the city's hydrants and Nice Ride docks, a sign at every Metro Transit
+  bus stop and a shelter where OpenStreetMap has one, the light rail's platform canopies, and OpenStreetMap's benches,
+  litter bins, mailboxes, wooden utility poles and bike racks.
+- Streets are asphalt, concrete or brick as the city's pavement map has them (`createPavedStreetMaterial`), with bike
+  lanes painted where its bikeway map has them: a lane line, a buffered lane's two, posts along a protected lane, red
+  bus lanes.
+- The Blue and Green Line trains run to Metro Transit's timetable (`js/mpls-transit.js`, `data/transit.json`) under
+  their overhead wire, at the hour the sky shows; the buses keep to Metro Transit's routes and show them on their signs.
+
+Not yet: pedestrians crossing at the crosswalks (NYC's crossings follow Manhattan's grid). The trains don't stop the car.
 
 Add `#debug` to the URL for a test hook (`window.__mpls`).

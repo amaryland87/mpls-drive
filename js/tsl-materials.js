@@ -1748,6 +1748,45 @@ function createRoadSurfaceMaterial() {
 }
 
 /**
+ * [Mpls] Minneapolis's concrete and brick streets (the city's pavement map, bake_tiles.py), laid along the street: uv
+ * is metres along it and across it from one side. Concrete: pale slabs 4.5 m long with sawn joints across and a joint
+ * between each 3.6 m lane, every slab its own tone. Brick (kind 'brick'): red pavers 20 by 10 cm in running bond, set
+ * in sand. The joints settle to their mean from far away, and both darken and pool in the rain like the asphalt.
+ */
+function createPavedStreetMaterial(kind) {
+  const mat = new THREE.MeshStandardNodeMaterial({ metalness: 0.0, roughness: 0.85 });
+  const brick = kind === 'brick';
+  const p = uv();
+  const wet = roadWetMasks(roadPuddleField(positionWorld.x, positionWorld.z));
+  // a soft line at every whole number of t, w wide (in t's units), faded to its mean once it's under a pixel
+  const joint = (t, w) => {
+    const fw = max(fwidth(t), 0.0001);
+    const d = abs(fract(t.add(0.5)).sub(0.5));
+    return float(1.0).sub(smoothstep(w.mul(0.5).sub(fw), w.mul(0.5).add(fw), d)).mul(smoothstep(0.6, 0.2, fw)).add(
+      smoothstep(0.2, 0.6, fw).mul(w));
+  };
+  mat.colorNode = Fn(() => {
+    if (brick) {
+      const row = floor(p.y.div(0.1));
+      const u = p.x.div(0.2).add(row.mul(0.5));
+      const cell = vec2(floor(u), row);
+      const tone = hash2D(cell).mul(0.35).add(0.75);
+      const base = mix(color(0x7a3a2c), color(0xa0563f), hash2D(cell.add(7.1))).mul(tone);
+      const mortar = max(joint(u, float(0.06)), joint(p.y.div(0.1), float(0.1)));
+      return mix(base, color(0x6f6a62), mortar.mul(0.8)).mul(mix(float(1.0), float(0.62), max(wet.x, wet.y)));
+    }
+    const slab = vec2(floor(p.x.div(4.5)), floor(p.y.div(3.6)));
+    const tone = hash2D(slab).mul(0.1).add(0.9).mul(noise2D(positionWorld.xz.mul(0.7)).mul(0.08).add(0.96));
+    const base = color(0xb3b1aa).mul(tone);
+    const seams = max(joint(p.x.div(4.5), float(0.004)), joint(p.y.div(3.6), float(0.005)));
+    return mix(base, color(0x55534e), seams).mul(mix(float(1.0), float(0.7), max(wet.x, wet.y)));
+  })();
+  mat.roughnessNode = mix(float(brick ? 0.82 : 0.9), float(0.2), wet.y);
+  mat.aoNode = canyonSkyAONode();
+  return mat;
+}
+
+/**
  * Road markings built from the road network (js/road-paint.js): vertex-coloured strips whose `paint` attribute
  * holds (metres along the strip, pattern period, duty cycle) and `side` the offset from the strip's centre line.
  * Strips thinner than ~1.5 px are widened on screen and faded to match (phone-wire AA) and dashes are box-filtered,
@@ -3023,6 +3062,7 @@ export {
   createMarbleAshlarMaterial,
   createTreeGrateMaterial,
   createRoadSurfaceMaterial,
+  createPavedStreetMaterial, // [Mpls]
   createRoadPaintMaterial,
   createSidewalkMaterial,
   createCurbMaterial,

@@ -4,6 +4,8 @@
     .venv/bin/python fetch_osm.py                # downloads and cuts the map data into osm-cache/
     .venv/bin/python fetch_lidar.py              # optional: real heights, roof shapes and trees
     .venv/bin/python fetch_ground.py             # optional: the lie of the land (needs fetch_lidar.py's cache)
+    .venv/bin/python fetch_city.py               # optional: walls, roofs, lights, hydrants, pavement, bike lanes
+    .venv/bin/python bake_transit.py             # optional: the bus stops (and the trains' schedule)
     .venv/bin/python bake_tiles.py ../../public/mpls-drive/city
     .venv/bin/python make_textures.py ../../public/mpls-drive/tex
 
@@ -13,21 +15,33 @@ The map (see area.py) is cut into 1 km tiles. For each tile i_j this writes
   t/i_j-s.jpg  the same at 512 px, for phones
   t/i_j.json   the 3D things on it:
     b  buildings   [facade layer, tint, height*10, base height*10, flags, rings, n, x, z, ...]
-                   flags: 1 storefront ground floor, 2 parapet and rooftop plant
+                   flags: 1 storefront ground floor, 2 parapet and rooftop plant; above them (flags >> 2)
+                   1 + the flat roof's colour in index.json roofs, if the aerial photo showed it
     h  houses      [x*10, z*10, angle*100, length*10, depth*10, eave*10, ridge*10, roof, front side,
                     wall tint, roof tint, flags]   roof: 0 flat 1 gable 2 gable across 3 hip;
                    front side: which wall faces the street (0 +x, 1 -x, 2 +z, 3 -z);
-                   flags: 1 chimney, 2 front porch
-    g  garages     [x*10, z*10, angle*100, length*10, depth*10, height*10, wall tint, door side]
+                   flags: 1 chimney, 2 front porch; flags >> 2 the walls (0 clapboard 1 stucco 2 brick
+                   3 cedar shakes, as the city assessor has them); roof tint indexes houseRoof, the
+                   aerial photo's colours
+    g  garages     [x*10, z*10, angle*100, length*10, depth*10, height*10, colours, door side]
+                   colours: the wall tint, plus 256 * (1 + the roof's in houseRoof) if the photo showed it
     t  trees       [x*10, z*10, height*10, crown radius*10]
     f  fences      [kind (0 fence 1 wall 2 hedge 3 low rail fence), n, x, z, ...]
     s  street signs [x*10, z*10, angle*100, name, angle*100, name], names indexing sn
     rd street pieces [class, width*10, lanes, oneway, start clearance*10, end clearance*10, n, x*10, z*10, ...]
                    class indexes the road order below (one past the end: a footpath or trail);
                    markings and sidewalks stop the clearance
-                   short of an intersection at that end
+                   short of an intersection at that end; after the points, the surface (0 asphalt
+                   1 concrete 2 brick 3 gravel) and bike lane (0 none 1 lane 2 buffered 3 protected
+                   4 shared with buses 5 bike boulevard), from the city's pavement and bikeway maps
     jn intersections [x*10, z*10, radius*10]
     cw crosswalks  [x*10, z*10, angle of the street*100, street width*10]
+    lp street lights [x*10, z*10, angle to the street*100, fixture (0 cobra head 1 lantern 2 acorn
+                   3 teardrop 4 shoebox 5 globe 6 accent)], the city's own
+    sg signalled corners [x*10, z*10]: junctions with an OpenStreetMap traffic signal
+    fu street furniture [kind, x*10, z*10, angle to the street*100]: 0 hydrant 1 bench 2 litter bin
+                   3 bus stop sign 4 bus shelter 5 Nice Ride dock 6 mailbox 7 utility pole 8 bike rack
+                   9 light rail platform canopy (its angle along the track)
     hx hero buildings, modelled in detail by hero_house.py (see there); they replace the ordinary
                    buildings, houses, garages and trees inside their outline (and the houses, garages
                    and trees under their walks and drives: clear)
@@ -43,7 +57,11 @@ Every building is a real OpenStreetMap footprint. Heights and roof shapes come f
 the 2022 USGS LiDAR survey where fetch_lidar.py measured them, then OpenStreetMap
 height tags, then the building type. 3D building:part shapes replace their outlines.
 
-Map data (c) OpenStreetMap contributors, ODbL. LiDAR: USGS 3DEP, public domain.
+Houses' walls, roofs and years come from the City of Minneapolis assessor where its parcel
+data has them (fetch_city.py), and every roof's colour from Hennepin County's 2022 aerial photo.
+
+Map data (c) OpenStreetMap contributors, ODbL. LiDAR: USGS 3DEP, public domain. City data:
+City of Minneapolis and Hennepin County open data; Metro Transit GTFS.
 """
 import glob, gzip, json, math, os, random, sys
 import numpy as np
@@ -51,7 +69,7 @@ from PIL import Image, ImageColor, ImageDraw, ImageFilter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from area import TILE, X0, X1, Z0, Z1
+from area import LAT0, LON0, MX, MY, TILE, X0, X1, Z0, Z1
 from footprints import bbox_of, buildings as load_buildings, load_osm as load, m, rings
 
 OUT = sys.argv[1]
@@ -278,6 +296,140 @@ def side_point(cx, cz, ang, w, d, side):
     return cx + lu * math.cos(ang) - lv * math.sin(ang), cz + lu * math.sin(ang) + lv * math.cos(ang)
 
 
+# ------------------------------------------------------------ city data
+# What the City of Minneapolis, Hennepin County and Metro Transit publish (fetch_city.py, bake_transit.py): each
+# parcel's walls and roof from the assessor, the street lights, hydrants, Nice Ride docks, pavement and bike lanes,
+# the bus stops, and the aerial photo the roofs take their colours from. Where any of it is missing the city is
+# baked as before.
+CITY = os.path.join(CACHE, 'city')
+
+
+def cload(name, default):
+    path = os.path.join(CITY, name)
+    return json.load(open(path)) if os.path.exists(path) else default
+
+
+class Grid:
+    """Things with a bounding box, bucketed in cells of `size` metres, to find those near a point."""
+    def __init__(self, size):
+        self.size, self.cells = size, {}
+
+    def add(self, item, x0, z0, x1, z1):
+        s = self.size
+        for i in range(int(x0 // s), int(x1 // s) + 1):
+            for j in range(int(z0 // s), int(z1 // s) + 1):
+                self.cells.setdefault((i, j), []).append(item)
+
+    def near(self, x, z, r=0):
+        s, seen = self.size, set()
+        for i in range(int((x - r) // s), int((x + r) // s) + 1):
+            for j in range(int((z - r) // s), int((z + r) // s) + 1):
+                for it in self.cells.get((i, j), ()):
+                    if id(it) not in seen:
+                        seen.add(id(it))
+                        yield it
+
+
+def seg_dist(x, z, ax, az, bx, bz):
+    """Distance from (x, z) to the segment a-b, and the nearest point on it."""
+    ex, ez = bx - ax, bz - az
+    L2 = ex * ex + ez * ez or 1e-9
+    t = max(0, min(1, ((x - ax) * ex + (z - az) * ez) / L2))
+    px, pz = ax + ex * t, az + ez * t
+    return math.hypot(x - px, z - pz), px, pz
+
+
+PARCELS = Grid(60)
+n_parcels = 0
+for p in cload('parcels.json', []):
+    rs = [[m(la, lo) for la, lo in r] for r in p['rings']]
+    if not rs or not rs[0]:
+        continue
+    p['xz'] = rs
+    xs, zs = [q[0] for q in rs[0]], [q[1] for q in rs[0]]
+    PARCELS.add(p, min(xs), min(zs), max(xs), max(zs))
+    n_parcels += 1
+
+
+def inside_ring(x, z, r):
+    hit = False
+    for i in range(len(r)):
+        (x1, z1), (x2, z2) = r[i - 1], r[i]
+        if (z1 > z) != (z2 > z) and x < x1 + (z - z1) * (x2 - x1) / (z2 - z1):
+            hit = not hit
+    return hit
+
+
+def parcel_at(x, z):
+    for p in PARCELS.near(x, z):
+        if inside_ring(x, z, p['xz'][0]):
+            return p
+    return None
+
+
+# Walls the assessor names, as the game's house walls: 0 clapboard (wood, vinyl and steel siding), 1 stucco, 2 brick,
+# 3 cedar shakes. Each has its own colours: painted siding, stucco's creams and greys, brick's reds and browns (over
+# the red brick texture), stained cedar.
+WALL_KIND = {'STUCCO': 1, 'CONCRETE': 1, 'BRICK': 2, 'STONE': 2, 'WOOD SHAKE': 3}
+STUCCO_WALL = ['#efe9dc', '#e6dcc6', '#d9d3c5', '#ece4d0', '#d4c8b0', '#c9c3b5', '#e8dfcf', '#bfb6a3', '#d8c9a3', '#b8bcb2']
+BRICK_WALL = ['#ffffff', '#f3e9e3', '#e9ddd6', '#dccbc2', '#d9c2b5', '#c7a99a', '#f0dfd3', '#b89a8c']
+SHAKE_WALL = ['#b98f68', '#9c7552', '#8d8579', '#a8a399', '#7d6a55', '#c4a27c', '#6f665c', '#b3aa98']
+# The assessor's roofs, as the game's: 1 gable (turned whichever way the LiDAR found it), 3 hip, 0 flat
+ROOF_KIND = {'GABLE': 1, 'GAMBREL': 1, 'SHED': 1, 'HIP': 3, 'MANSARD': 3, 'FLAT': 0}
+
+# The aerial photo: each tile's picture (fetch_city.py) and the degrees it covers, read when a roof needs it
+AERIAL = {}
+
+
+def aerial(i, j):
+    if (i, j) not in AERIAL:
+        if len(AERIAL) > 6:
+            AERIAL.pop(next(iter(AERIAL)))
+        path = os.path.join(CITY, 'aerial', f'{i}_{j}.jpg')
+        AERIAL[(i, j)] = (np.asarray(Image.open(path).convert('RGB')), json.load(open(path[:-4] + '.json'))) \
+            if os.path.exists(path) else None
+    return AERIAL[(i, j)]
+
+
+def roof_photo(ring, inset=0.8):
+    """The roof's colour in the aerial photo inside a footprint ring (pulled in by inset metres from its edge, past
+    the eaves and the trees hanging over them): the median of what isn't leaves or deep shadow, or None."""
+    cx = sum(p[0] for p in ring) / len(ring)
+    cz = sum(p[1] for p in ring) / len(ring)
+    A = aerial(int((cx - X0) // TILE), int((cz - Z0) // TILE))
+    if A is None:
+        return None
+    img, (w, s, e, n) = A
+    H, Wd = img.shape[:2]
+
+    def px(x, z):
+        lat, lon = LAT0 - z / MY, LON0 + x / MX
+        return (lon - w) / (e - w) * Wd, (n - lat) / (n - s) * H
+    rad = max(1e-3, sum(math.hypot(p[0] - cx, p[1] - cz) for p in ring) / len(ring))
+    k = max(0.3, 1 - inset / rad)
+    pts = [px(cx + (p[0] - cx) * k, cz + (p[1] - cz) * k) for p in ring]
+    x0, y0 = int(max(0, min(p[0] for p in pts))), int(max(0, min(p[1] for p in pts)))
+    x1, y1 = int(min(Wd - 1, max(p[0] for p in pts))) + 1, int(min(H - 1, max(p[1] for p in pts))) + 1
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    mask = Image.new('L', (x1 - x0, y1 - y0), 0)
+    ImageDraw.Draw(mask).polygon([(p[0] - x0, p[1] - y0) for p in pts], fill=1)
+    sel = img[y0:y1, x0:x1][np.asarray(mask, bool)].astype(np.float32)
+    if len(sel) < 4:
+        return None
+    r, g, b = sel[:, 0], sel[:, 1], sel[:, 2]
+    keep = ~((g > r + 6) & (g > b + 4)) & (r + g + b > 90)
+    if keep.sum() >= max(4, len(sel) * 0.2):
+        sel = sel[keep]
+    return np.median(sel, axis=0)
+
+
+LIGHTS = cload('lights.json', [])
+HYDRANTS = cload('hydrants.json', [])
+NICERIDE = cload('niceride.json', [])
+STOPS = cload('stops.json', [])
+print('city data: parcels', n_parcels, 'lights', len(LIGHTS), 'hydrants', len(HYDRANTS), 'stops', len(STOPS), flush=True)
+
 # ------------------------------------------------------------- buildings
 LIDAR_B = jload('lidar_buildings.json', {})
 LIDAR_T = jload('lidar_trees.json', None)
@@ -304,6 +456,8 @@ OVERRIDE = {   # name -> (height m if OpenStreetMap has none, wall colour)
     'Target Center': (41, '#c99a85'),
     'Guthrie Theater': (35, '#6f8fb3'),
 }
+HOUSE_WALLS = HOUSE_WALL + STUCCO_WALL + BRICK_WALL + SHAKE_WALL       # the game's houseWall palette
+WALL_BASE = [0, len(HOUSE_WALL), len(HOUSE_WALL) + len(STUCCO_WALL), len(HOUSE_WALL) + len(STUCCO_WALL) + len(BRICK_WALL)]
 HOUSE_TAGS = ('house', 'detached', 'residential', 'semidetached_house', 'bungalow', 'cabin', 'hosue')
 BOX_TAGS = ('garage', 'garages', 'shed', 'carport', 'hut')
 SHOP_TAGS = ('retail', 'commercial', 'supermarket', 'kiosk', 'mixed_use')
@@ -423,24 +577,34 @@ for b in load_buildings():
     # Houses with a bump-out or an L still get a house's roof over their bounding rectangle.
     if fill > 0.65 and h <= 12 and 50 <= a < 300 and (tag in HOUSE_TAGS or tag == 'yes') and (not L or L[0] < 18):
         w, d = rect[3], rect[4]
+        # What the assessor says of the house on this parcel: its walls, its roof, its year and its storeys
+        P = parcel_at(b['cx'], b['cz'])
+        said = ROOF_KIND.get(P['roof']) if P else None
         if L and L[0] >= 3:
             ridge, roof, eave = L
             measured += 1
-            if roof == 0 and a < 200:
+            if roof == 0 and a < 200 and said != 0:
                 # Nearly every small Minneapolis house is pitched: a "flat" reading is usually branches over the roof.
-                roof = 3 if b['id'] % 3 == 0 else 1
+                roof = said if said is not None else 3 if b['id'] % 3 == 0 else 1
                 eave = max(2.6, ridge - 0.33 * d)
             elif roof == 0:
                 eave = ridge
+            elif said == 3:
+                roof = 3                  # the survey's points are too few to tell a hip from a gable; the assessor can
+            elif said == 1 and roof == 3:
+                roof = 1
             eave = max(2.6, min(eave, ridge))
             ridge = min(ridge, eave + 0.65 * (d if roof != 2 else w))
         else:
-            lv = num(t.get('building:levels'))
-            eave = lv * 3 + 0.5 if lv and lv <= 3 else 5.0
-            roof = 3 if b['id'] % 3 == 0 else 1
-            ridge = eave + d * 0.35
+            lv = num(t.get('building:levels')) or (P and P['stories'])
+            eave = lv * 2.9 + 0.5 if lv and lv <= 3 else 5.0
+            roof = said if said is not None else 3 if b['id'] % 3 == 0 else 1
+            ridge = eave + (d * 0.35 if roof else 0)
+        kind = WALL_KIND.get(P['wall'], 0) if P else 0
+        pal = (HOUSE_WALL, STUCCO_WALL, BRICK_WALL, SHAKE_WALL)[kind]
+        wc = WALL_BASE[kind] + b['id'] % len(pal)
         houses.append([rect[0], rect[1], rect[2], w, d, eave, ridge, roof, -1,
-                       b['id'] % len(HOUSE_WALL), (b['id'] // 7) % len(HOUSE_ROOF), 0, r])
+                       wc, (b['id'] // 7) % len(HOUSE_ROOF), kind << 2, r, P['year'] if P else 0])
         poly(r, 'roof')
         continue
     if not explicit and L and 2.5 <= L[0] < 300:
@@ -478,9 +642,12 @@ for hs in houses:
         if L > sw / 2 + 1:
             k = (L - sw / 2) / L
             line([(fx, fz), (fx + (px - fx) * k, fz + (pz - fz) * k)], 1.3, 'walk')
-        if random.random() < 0.55 and w * d > 70:
+        # Front porches on the old houses (nearly every one built before the 1930s has one), a few on the newer
+        year = hs[13]
+        if random.random() < (0.85 if 0 < year < 1930 else 0.35 if 0 < year < 1960 else 0.15 if year else 0.55) and w * d > 70:
             hs[11] |= 2
-    if hs[7] != 0 and random.random() < 0.5:
+    year = hs[13]
+    if hs[7] != 0 and random.random() < (0.75 if 0 < year < 1950 else 0.25 if year else 0.5):
         hs[11] |= 1
     house_grid.setdefault((int(cx // 40), int(cz // 40)), []).append((cx, cz))
 
@@ -543,8 +710,9 @@ for _, hw, pts, t, _ in roads:
 for _, hw, pts, t, _ in roads:                    # a pale centre line on the big roads
     if hw in ('motorway', 'trunk', 'primary'):
         line(pts, 0.9, 'line')
-for e in load('rail'):
-    line(rings(e)[0][1], 5, 'rail')
+for e in load('rail'):                            # railways and the light rail's tracks, not where they run underground
+    if e.get('tags', {}).get('tunnel') in (None, 'no'):
+        line(rings(e)[0][1], 5, 'rail')
 print('ops', len(ops), 'buildings', len(solids), 'houses', len(houses), 'garages', len(boxes), 'fences', len(fences), flush=True)
 
 # ----------------------------------------------- the 2 m class grid
@@ -766,6 +934,173 @@ for key, rs in junctions.items():
         junction_pads.append((x, z, max(WIDTH[roads[o][1]] for o in rs) / 2))
 print('street pieces', len(street_pieces), 'junctions', len(junction_pads), 'crosswalks', len(crosswalks), flush=True)
 
+
+def nearest_pave(x, z, reach=40):
+    """The nearest street or path centreline on the ground: (distance, x, z, half width) or None."""
+    best = None
+    for i in range(int((x - reach) // PG), int((x + reach) // PG) + 1):
+        for j in range(int((z - reach) // PG), int((z + reach) // PG) + 1):
+            for a, b, half in pavement.get((i, j), ()):
+                d, px, pz = seg_dist(x, z, a[0], a[1], b[0], b[1])
+                if d < reach and (best is None or d < best[0]):
+                    best = (d, px, pz, half)
+    return best
+
+
+def off_the_street(x, z, gap):
+    """(x, z) moved out of the street to gap metres past its edge if it stands in it, and the angle from there to the
+    street's middle (or None with no street near)."""
+    st = nearest_pave(x, z)
+    if not st:
+        return x, z, None
+    d, px, pz, half = st
+    if d > 1e-3:
+        ux, uz = (x - px) / d, (z - pz) / d
+        if d < half + gap:
+            x, z = px + ux * (half + gap), pz + uz * (half + gap)
+        return x, z, math.atan2(-uz, -ux)
+    return x, z, None
+
+
+# Pavement and bike lanes (fetch_city.py): each street piece takes the surface and bike lane of the city's block
+# lines lying along it. Appended to its record: surface (0 asphalt, 1 concrete, 2 brick, 3 gravel) and bike lane
+# (0 none, 1 a lane, 2 buffered, 3 protected by posts, 4 shared with buses, 5 a bike boulevard's markings).
+SURFACE = {'PCC': 1, 'BR': 2, 'PVB': 2, 'GR': 3}
+BIKE = {'Bike Lane': 1, 'Advisory Bike Lane': 1, 'Buffered Bike Lane': 2, 'On-Street Protected Bike Lane': 3,
+        'Shared Bike/Bus Lane': 4, 'Bike Boulevard': 5, 'Shared Use Pavement Marking': 5}
+
+
+def line_grid(items, code_of):
+    G = Grid(40)
+    for it in items:
+        code = code_of(it)
+        if not code:
+            continue
+        for ln in it['lines']:
+            pts = [m(la, lo) for la, lo in ln]
+            for a, b in zip(pts, pts[1:]):
+                G.add((a[0], a[1], b[0], b[1], code), min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+    return G
+
+
+def vote(G, run, reach=10):
+    """The code of the city lines lying along a street piece (most of its length), or 0."""
+    cum = [0]
+    for a, b in zip(run, run[1:]):
+        cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    votes = {}
+    for f in (0.2, 0.5, 0.8):
+        s = cum[-1] * f
+        k = max(1, next((i for i, c in enumerate(cum) if c >= s), len(run) - 1))
+        a, b = run[k - 1], run[k]
+        L = math.hypot(b[0] - a[0], b[1] - a[1]) or 1
+        ux, uz = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+        t = (s - cum[k - 1]) / L
+        x, z = a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
+        best = None
+        for ax, az, bx, bz, code in G.near(x, z, reach):
+            sl = math.hypot(bx - ax, bz - az) or 1
+            if abs((bx - ax) / sl * ux + (bz - az) / sl * uz) < 0.8:
+                continue
+            d = seg_dist(x, z, ax, az, bx, bz)[0]
+            if d < reach and (best is None or d < best[0]):
+                best = (d, code)
+        if best:
+            votes[best[1]] = votes.get(best[1], 0) + 1
+    code, n = max(votes.items(), key=lambda kv: kv[1]) if votes else (0, 0)
+    return code if n >= 2 else 0
+
+
+PAVE_G = line_grid(cload('pavement.json', []), lambda it: SURFACE.get(it['surface'], 9))
+BIKE_G = line_grid(cload('bikeways.json', []), lambda it: BIKE.get(it['type'], 0))
+surfaced = {}
+for k, (cls, w, lanes, oneway, t0, t1, run) in enumerate(street_pieces):
+    sf = vote(PAVE_G, run)
+    bk = vote(BIKE_G, run, 12) if order[cls] not in FREEWAY else 0
+    street_pieces[k] = (cls, w, lanes, oneway, t0, t1, run, 0 if sf == 9 else sf, bk)
+    surfaced[sf] = surfaced.get(sf, 0) + 1
+print('street surfaces (9: asphalt, matched)', surfaced, flush=True)
+
+# The street lights (fetch_city.py): every city-owned light where it stands, its fixture as the game draws it
+# (0 cobra head, 1 lantern, 2 acorn, 3 teardrop, 4 shoebox, 5 globe, 6 accent), turned to face the street.
+LAMP_STYLE = (('cobra', 0), ('lantern', 1), ('acorn', 2), ('tear', 3), ('shoebox', 4), ('globe', 5), ('accent', 6))
+lamps, lamp_seen = [], Grid(4)
+for la, lo, kind in LIGHTS:
+    x, z = m(la, lo)
+    if not in_map(x, z) or any(math.hypot(x - q[0], z - q[1]) < 1.0 for q in lamp_seen.near(x, z, 1)):
+        continue                                  # two heads on one pole
+    lamp_seen.add((x, z), x, z, x, z)
+    style = next((n for k, n in LAMP_STYLE if k in kind.lower()), 0)
+    x, z, ang = off_the_street(x, z, 0.5)
+    lamps.append((x, z, ang if ang is not None else 0, style))
+print('lamps', len(lamps), flush=True)
+
+# Signalled corners: every junction with an OpenStreetMap traffic signal within SIGNAL_R of it
+SIGNAL_R = 18
+POINTS = load('points')
+sig_g = Grid(30)
+for p in POINTS:
+    if p['kind'] == 'signal':
+        x, z = m(p['lat'], p['lon'])
+        sig_g.add((x, z), x, z, x, z)
+signals = [(x, z) for x, z, _ in junction_pads
+           if any(math.hypot(x - q[0], z - q[1]) < SIGNAL_R for q in sig_g.near(x, z, SIGNAL_R))]
+print('signalled junctions', len(signals), flush=True)
+
+# Street furniture: [kind, x, z, angle to the street]. 0 hydrant, 1 bench, 2 litter bin, 3 bus stop sign, 4 bus
+# shelter, 5 Nice Ride dock, 6 mailbox, 7 utility pole, 8 bike rack, 9 light rail platform canopy. The city's hydrants
+# and docks, Metro Transit's stops, and the rest from OpenStreetMap.
+furniture = []
+OSM_FURN = {'bench': 1, 'bin': 2, 'mailbox': 6, 'pole': 7, 'bikerack': 8}
+for la, lo in HYDRANTS:
+    furniture.append([0, *m(la, lo), 0.7])
+for la, lo, _ in NICERIDE:
+    furniture.append([5, *m(la, lo), 1.2])
+shelters = Grid(30)
+for p in POINTS:
+    x, z = m(p['lat'], p['lon'])
+    t = p.get('tags', {})
+    if p['kind'] in OSM_FURN:
+        furniture.append([OSM_FURN[p['kind']], x, z, 0.6])
+    elif (p['kind'] == 'shelter' and t.get('shelter_type') == 'public_transport') or (p['kind'] == 'stop' and t.get('shelter') == 'yes'):
+        shelters.add([x, z, False], x, z, x, z)
+for la, lo, kind, name in STOPS:
+    x, z = m(la, lo)
+    if kind == 'rail':
+        furniture.append([9, x, z, -1])
+        continue
+    sh = min(shelters.near(x, z, 20), key=lambda q: math.hypot(q[0] - x, q[1] - z), default=None)
+    if sh and math.hypot(sh[0] - x, sh[1] - z) < 20 and not sh[2]:
+        sh[2] = True
+        furniture.append([4, sh[0], sh[1], 2.2])
+    furniture.append([3, x, z, 0.5])
+for sh in [q for c in shelters.cells.values() for q in c]:
+    if not sh[2]:
+        sh[2] = True
+        furniture.append([4, sh[0], sh[1], 2.2])
+# Off the street (gap: how far past its edge), facing it; the platform canopies run along the track instead
+rail_lines = [[m(p['lat'], p['lon']) for p in e['geometry']] for e in load('rail') if e.get('tags', {}).get('railway') == 'light_rail']
+placed = []
+for kind, x, z, gap in furniture:
+    if not in_map(x, z):
+        continue
+    if kind == 9:
+        best = None
+        for ln in rail_lines:
+            for a, b in zip(ln, ln[1:]):
+                d = seg_dist(x, z, a[0], a[1], b[0], b[1])[0]
+                if d < 30 and (best is None or d < best[0]):
+                    best = (d, math.atan2(b[1] - a[1], b[0] - a[0]))
+        if best:
+            placed.append((9, x, z, best[1]))
+        continue
+    x, z, ang = off_the_street(x, z, gap)
+    if kind == 7 and ang is None:
+        continue
+    placed.append((kind, x, z, ang if ang is not None else 0))
+furniture = placed
+print('street furniture', {k: sum(1 for f in furniture if f[0] == k) for k in range(10)}, flush=True)
+
 # Bridges: every road and path OpenStreetMap marks as a bridge gets a deck along its line. Bridge
 # ways that run on from one another are chained, so each chain starts and ends on the ground, and
 # the deck runs evenly between those two heights (and never below the ground, nor close over water).
@@ -775,6 +1110,9 @@ def pkey(p):
 
 bways = [(pts, WIDTH[hw] + 3) for _, hw, pts, t, _ in roads if hw not in ('pedestrian', 'living_street') and is_bridge(t)]
 bways += [(pts, w + 1.4) for pts, w, t in paths if is_bridge(t)]
+# The light rail's viaducts (the Blue Line over Lake Street and the railway), so its trains run up on them
+bways += [([m(p['lat'], p['lon']) for p in e['geometry']], 9) for e in load('rail')
+          if e.get('tags', {}).get('railway') == 'light_rail' and is_bridge(e.get('tags', {})) and e.get('geometry')]
 ends = {}
 for n, (pts, _) in enumerate(bways):
     for p in (pts[0], pts[-1]):
@@ -910,12 +1248,12 @@ for pts, w, t in paths:
         i, j = cell((p[0] + q[0]) / 2, (p[1] + q[1]) / 2)
         if 0 <= i < GH and 0 <= j < GW and wet[i, j]:
             if len(run) >= 2:
-                street_pieces.append((len(order), w, 0, 0, 0, 0, run))
+                street_pieces.append((len(order), w, 0, 0, 0, 0, run, 0, 0))
             run = [q]
         else:
             run.append(q)
     if len(run) >= 2:
-        street_pieces.append((len(order), w, 0, 0, 0, 0, run))
+        street_pieces.append((len(order), w, 0, 0, 0, 0, run, 0, 0))
 
 # Car routes: every main street on the map, as polylines cars can drive along.
 routes = []
@@ -926,6 +1264,53 @@ for _, hw, pts, t, _ in roads:
     if len(near) >= 2 and sum(math.hypot(near[i + 1][0] - near[i][0], near[i + 1][1] - near[i][1]) for i in range(len(near) - 1)) > 120:
         routes.append((WIDTH[hw], 1 if t.get('oneway') == 'yes' or hw == 'motorway' else 0, near))
 print('bridges', len(bridges), 'routes', len(routes), flush=True)
+
+# ------------------------------------------------------------ roof colours
+# Every roof takes its colour from the aerial photo (fetch_city.py), tile by tile. The colours are gathered into a
+# palette of ROOF_N (k-means), which the houses, garages and flat roofs index. Without the photo, houses and garages
+# keep their made-up roofs and flat roofs the game's greys.
+ROOF_N = 64
+
+
+def rect_ring(cx, cz, ang, w, d):
+    c, s_ = math.cos(ang), math.sin(ang)
+    return [(cx + u * c - v * s_, cz + u * s_ + v * c) for u, v in ((-w / 2, -d / 2), (w / 2, -d / 2), (w / 2, d / 2), (-w / 2, d / 2))]
+
+
+jobs = [(h[0], h[1], 'h', k, h[12]) for k, h in enumerate(houses)] \
+    + [(g[0], g[1], 'g', k, rect_ring(*g[:5])) for k, g in enumerate(boxes)] \
+    + [(s['cx'], s['cz'], 'b', k, s['r']) for k, s in enumerate(solids) if s['h0'] == 0]
+jobs.sort(key=lambda j: (int((j[0] - X0) // TILE), int((j[1] - Z0) // TILE)))
+seen_roofs = {}
+for x, z, kind, k, ring in jobs:
+    c = roof_photo(ring, 0.5 if kind == 'g' else 0.8)
+    if c is not None:
+        seen_roofs[(kind, k)] = c
+AERIAL.clear()
+roof_pal = []
+if len(seen_roofs) > ROOF_N * 4:
+    cols = np.array(list(seen_roofs.values()), np.float32)
+    rng = np.random.default_rng(5)
+    cent = cols[rng.choice(len(cols), ROOF_N, replace=False)]
+    for _ in range(12):
+        lab = np.argmin(((cols[:, None, :] - cent[None]) ** 2).sum(-1), 1) if len(cols) < 200000 else \
+            np.concatenate([np.argmin(((cols[q:q + 50000, None, :] - cent[None]) ** 2).sum(-1), 1) for q in range(0, len(cols), 50000)])
+        for n in range(ROOF_N):
+            if (lab == n).any():
+                cent[n] = cols[lab == n].mean(0)
+    lab = np.concatenate([np.argmin(((cols[q:q + 50000, None, :] - cent[None]) ** 2).sum(-1), 1) for q in range(0, len(cols), 50000)])
+    roof_pal = ['#%02x%02x%02x' % tuple(int(round(v)) for v in c) for c in cent]
+    for (kind, k), n in zip(seen_roofs.keys(), lab):
+        n = int(n)
+        if kind == 'h':
+            houses[k][10] = n
+        elif kind == 'g':
+            boxes[k][6] |= (n + 1) << 8          # wall colour in the low byte, 1 + the roof's above it
+        else:
+            solids[k]['flags'] |= (n + 1) << 2   # 1 + the flat roof's colour, above the storefront and parapet bits
+print('roofs from the aerial photo', len(seen_roofs), 'of', len(jobs), flush=True)
+if roof_pal:
+    HOUSE_ROOF = roof_pal                     # the houses index the photo's palette now
 
 # ------------------------------------------------------------------ write
 os.makedirs(os.path.join(OUT, 't'), exist_ok=True)
@@ -947,7 +1332,7 @@ data = {}
 
 
 def tile_data(x, z):
-    return data.setdefault(tile_of(x, z), dict(b=[], h=[], g=[], t=[], f=[], s=[], sn=[], rd=[], jn=[], cw=[], hx=[]))
+    return data.setdefault(tile_of(x, z), dict(b=[], h=[], g=[], t=[], f=[], s=[], sn=[], rd=[], jn=[], cw=[], hx=[], lp=[], sg=[], fu=[]))
 
 
 # Hero buildings (hero_house.py): modelled in detail, in place of whatever ordinary building, house,
@@ -973,6 +1358,8 @@ if heroes:
     houses = [h for h in houses if not in_hero(h[0], h[1], True)]
     boxes = [b for b in boxes if not in_hero(b[0], b[1], True)]
     trees = [t for t in trees if not in_hero(t[0], t[1], True)]
+    lamps = [q for q in lamps if not in_hero(q[0], q[1])]
+    furniture = [q for q in furniture if not in_hero(q[1], q[2])]
     for hero in heroes:
         tile_data(hero['x'], hero['z'])['hx'].append({k: v for k, v in hero.items() if k not in ('name', 'clear')})
     print('hero buildings', [h['name'] for h in heroes], 'replaced', n0 - len(solids) - len(houses) - len(boxes) - len(trees), flush=True)
@@ -982,7 +1369,7 @@ for s in solids:
     for ring in [s['r']] + s['holes']:
         rec += [len(ring)] + [mi(v) for p in ring for v in p]
     tile_data(s['cx'], s['cz'])['b'].append(rec)
-for x, z, ang, w, d, eave, ridge, roof, front, wc, rc, flags, _ in houses:
+for x, z, ang, w, d, eave, ridge, roof, front, wc, rc, flags, _, _ in houses:
     tile_data(x, z)['h'] += [mi(x * 10), mi(z * 10), mi(ang * 100), mi(w * 10), mi(d * 10), mi(eave * 10), mi(ridge * 10),
                              roof, front, wc, rc, flags]
 for x, z, ang, w, d, h, c, _, door in boxes:
@@ -1003,10 +1390,18 @@ for x, z, a1, n1, a2, n2 in signs:
             td['sn'].append(n)
     td['s'] += [mi(x * 10), mi(z * 10), mi(a1 * 100), td['sn'].index(n1), mi(a2 * 100), td['sn'].index(n2)]
 
-for cls, w, lanes, oneway, t0, t1, run in street_pieces:
+for cls, w, lanes, oneway, t0, t1, run, sf, bk in street_pieces:
     mx, mz = run[len(run) // 2]
     if in_map(mx, mz):
-        tile_data(mx, mz)['rd'].append([cls, mi(w * 10), lanes, oneway, mi(t0 * 10), mi(t1 * 10), len(run)] + [mi(v * 10) for p in run for v in p])
+        tile_data(mx, mz)['rd'].append([cls, mi(w * 10), lanes, oneway, mi(t0 * 10), mi(t1 * 10), len(run)] + [mi(v * 10) for p in run for v in p]
+                                       + [sf, bk])
+for x, z, ang, style in lamps:
+    tile_data(x, z)['lp'] += [mi(x * 10), mi(z * 10), mi(ang * 100), style]
+for x, z in signals:
+    if in_map(x, z):
+        tile_data(x, z)['sg'] += [mi(x * 10), mi(z * 10)]
+for kind, x, z, ang in furniture:
+    tile_data(x, z)['fu'] += [kind, mi(x * 10), mi(z * 10), mi(ang * 100)]
 for x, z, r in junction_pads:
     if in_map(x, z):
         tile_data(x, z)['jn'] += [mi(x * 10), mi(z * 10), mi(r * 10)]
@@ -1053,14 +1448,14 @@ for j in range(NJ):
         img.resize((1024, 1024), Image.LANCZOS).save(name + '.jpg', quality=84, optimize=True, progressive=True)
         img.resize((512, 512), Image.LANCZOS).save(name + '-s.jpg', quality=84, optimize=True, progressive=True)
         overview.paste(img.resize((OV, OV), Image.LANCZOS), (i * OV, j * OV))
-        json.dump(data.get((i, j), dict(b=[], h=[], g=[], t=[], f=[], s=[], sn=[], rd=[], jn=[], cw=[], hx=[])), open(name + '.json', 'w'), separators=(',', ':'))
+        json.dump(data.get((i, j), dict(b=[], h=[], g=[], t=[], f=[], s=[], sn=[], rd=[], jn=[], cw=[], hx=[], lp=[], sg=[], fu=[])), open(name + '.json', 'w'), separators=(',', ':'))
     print('row', j, flush=True)
 overview.save(os.path.join(OUT, 'overview.jpg'), quality=84, optimize=True, progressive=True)
 
 index = dict(
-    note='OpenStreetMap contributors (ODbL); USGS 3DEP LiDAR. Metres from 44.966N 93.259W; x east, z south.',
+    note='OpenStreetMap contributors (ODbL); USGS 3DEP LiDAR; City of Minneapolis, Hennepin County, Metro Transit. Metres from 44.966N 93.259W; x east, z south.',
     bounds=[X0, X1, Z0, Z1], tile=TILE, ni=NI, nj=NJ,
-    walls=walls, houseWall=HOUSE_WALL, houseRoof=HOUSE_ROOF, boxWall=BOX_WALL,
+    walls=walls, houseWall=HOUSE_WALLS, houseRoof=HOUSE_ROOF, boxWall=BOX_WALL, roofs=roof_pal,
     br=[mi(v) for b in bridges for v in b],
     gr=dict(step=GSTEP, nx=GNX, nz=GNZ, e0=round(E0, 2)),
     r=[[mi(w), ow] + [mi(v) for p in pts for v in p] for w, ow, pts in routes],

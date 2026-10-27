@@ -1,4 +1,4 @@
-"""Build Mpls Drive's facade and roof textures: one 16-layer texture array.
+"""Build Mpls Drive's facade and roof textures: one texture array, a layer for each of LAYERS.
 
     .venv/bin/python make_textures.py ../../public/mpls-drive/tex
 
@@ -32,6 +32,11 @@ LAYERS = [
     ('brick_red_plain', 2.4, 3.6), ('brick_light_plain', 2.4, 3.6), ('concrete_plain', 3.0, 3.6),
     ('shingles', 2.0, 2.0), ('gravel_roof', 4.0, 4.0), ('fence', 2.4, 1.8), ('metal', 1.0, 1.0),
     ('asphalt', 4.0, 4.0), ('sidewalk', 1.5, 1.5), ('paint', 1.0, 1.0), ('grass', 2.8, 2.8),
+    # Houses by what the city assessor says their walls are (bake_tiles.py): stucco, brick and cedar shakes, at the
+    # clapboard's bay and floor, with its windows and door
+    ('stucco_win', 2.4, 2.9), ('stucco_plain', 2.4, 2.9), ('stucco_door', 2.4, 2.9),
+    ('brick_house_win', 2.4, 2.9), ('brick_house_door', 2.4, 2.9),
+    ('shakes_win', 2.4, 2.9), ('shakes_plain', 2.4, 2.9), ('shakes_door', 2.4, 2.9),
 ]
 
 
@@ -170,6 +175,47 @@ for name, w, h in LAYERS:
         rect(arrs, 0.5, 0.3, 0.508, 0.9, (0.15, 0.15, 0.16), 0.5, -0.3)
         rect(arrs, 0.03, 0.1, 0.97, 0.24, (0.16, 0.2, 0.22), 0.5, 0.15)         # sign band
         rect(arrs, 0.06, 0.9, 0.94, 1.0, (0.25, 0.25, 0.26), 0.5, 0.05)         # kickplate
+    elif name.startswith(('stucco', 'brick_house', 'shakes')):
+        if name.startswith('stucco'):
+            # Troweled stucco: pale, rough and blotchy, with a darker band of splash near the foot
+            arrs = list(blank((0.97, 0.96, 0.94)))
+            col, nor, msk, hgt = arrs
+            rough = noise(4, 0.5) + noise(10, 0.35) + noise(40, 0.15)
+            hgt[:] = rough * 0.6
+            col[:] = 0.93 + (noise(64, 0.06) + noise(8, 0.04))[..., None]
+        elif name.startswith('brick_house'):
+            arrs, base_n = wall(brick_red())
+            col, nor, msk, hgt = arrs
+        else:
+            # Cedar shakes: 18 cm courses of shingles 15 to 30 cm wide, each a little its own tone, shadowed under the
+            # course above
+            arrs = list(blank((0.95, 0.95, 0.94)))
+            col, nor, msk, hgt = arrs
+            rows = int(round(h / 0.18))
+            yy, xx = np.mgrid[0:N, 0:N] / N
+            r = np.floor(yy * rows).astype(int)
+            fy = (yy * rows) % 1
+            edges = np.cumsum(rng.uniform(0.15, 0.3, (rows, 40)), 1) / w
+            k = np.array([np.searchsorted(edges[i % rows], xx[0] + (i % 2) * 0.37 / w) for i in range(rows)])
+            tone = rng.random((rows, 41)) * 0.22 + 0.78
+            col[:] = (tone[r, k[r, np.arange(N)[None, :].repeat(N, 0)]] * (0.86 + 0.14 * fy))[..., None] + noise(24, 0.04)[..., None]
+            col[fy > 0.92] *= 0.6
+            hgt[:] = fy * 0.7
+            gap = np.zeros((N, N), bool)
+            for i in range(rows):
+                ex = (np.searchsorted(edges[i], xx[0] + (i % 2) * 0.37 / w) != np.searchsorted(edges[i], xx[0] + (i % 2) * 0.37 / w + 1.5 / N))
+                gap[r == i] = np.broadcast_to(ex, (N, N))[r == i]
+            col[gap] *= 0.55
+            hgt[gap] = -0.4
+        trim = (0.96, 0.96, 0.94) if not name.startswith('brick') else (0.92, 0.9, 0.85)
+        if name.endswith('_win'):
+            window(arrs, 0.31, 0.2, 0.69, 0.72, frame=trim, deep=not name.startswith('shakes'))
+        elif name.endswith('_door'):
+            rect(arrs, 0.27, 0.22, 0.73, 1.0, trim, 0.5, 0.1)                       # door casing
+            rect(arrs, 0.31, 0.26, 0.69, 1.0, (0.25, 0.2, 0.17), 0.5, -0.5)         # the door
+            for k in range(3):
+                rect(arrs, 0.35, 0.32 + k * 0.22, 0.65, 0.48 + k * 0.22, (0.21, 0.17, 0.14), 0.5, -0.65)
+            rect(arrs, 0.61, 0.66, 0.635, 0.69, (0.8, 0.68, 0.32), 0.5, -0.2)       # knob
     elif name.startswith('siding') or name in ('garage_door', 'fence'):
         # Painted clapboard: 15 cm boards, each a little shadowed under the one above.
         arrs = list(blank((0.97, 0.97, 0.96)))
