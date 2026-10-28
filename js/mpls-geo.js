@@ -695,7 +695,9 @@ function signGeo(G, B, s, atlas) {
   [[a1, n1, 2.95], [a2, n2, 3.2]].forEach(([a100, n, y]) => {
     const ang = a100 / 100, len = Math.max(0.6, atlas.lens[n] / 1024 * 2.6), hgt = 0.22;
     const ux = Math.cos(ang), uz = Math.sin(ang);
-    const v0 = 1 - (n + 1) / atlas.rows, v1 = 1 - n / atlas.rows, u1 = atlas.lens[n] / 1024;
+    // [Mpls] the atlas is uploaded unflipped (mpls-city.js signTex.flipY = false): v runs down the canvas, so row n's
+    // bottom edge, under the blade's foot, is (n + 1) / rows and its top n / rows
+    const v0 = (n + 1) / atlas.rows, v1 = n / atlas.rows, u1 = atlas.lens[n] / 1024;
     const p = (t, yy) => [x + ux * t, base + yy, z + uz * t];
     const a = p(-len / 2, y), b = p(len / 2, y), c = p(len / 2, y + hgt), d = p(-len / 2, y + hgt);
     B.p.push(...a, ...b, ...c, ...a, ...c, ...d);
