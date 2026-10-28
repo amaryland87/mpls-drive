@@ -1120,6 +1120,38 @@ for n, (pts, _) in enumerate(bways):
 seen, bridges, chains = set(), [], []
 
 
+GRADE = 0.10          # steeper than any ramp: a reading the deck couldn't reach at this grade isn't its own
+
+
+def even_deck(cum, seen):
+    """A deck's heights along it from the survey's readings (nan where it saw none): where one deck passes over another,
+    the survey's grid (the lowest deck in each cell) reads the one underneath, so readings lower than a ramp of GRADE
+    could come down to from those either side of them go, and likewise any well over what it could climb to; what's
+    left is joined up and smoothed."""
+    cum = np.asarray(cum, float)
+    r = np.asarray(seen, float).copy()
+    for _ in range(3):
+        ok = np.isfinite(r)
+        if ok.sum() < 2:
+            break
+        h = np.interp(cum, cum[ok], r[ok])
+        up, down = h.copy(), h.copy()
+        for k in range(1, len(h)):                              # the most a ramp could have dropped / climbed since
+            up[k] = max(up[k], up[k - 1] - GRADE * (cum[k] - cum[k - 1]))
+            down[k] = min(down[k], down[k - 1] + GRADE * (cum[k] - cum[k - 1]))
+        for k in range(len(h) - 2, -1, -1):
+            up[k] = max(up[k], up[k + 1] - GRADE * (cum[k + 1] - cum[k]))
+            down[k] = min(down[k], down[k + 1] + GRADE * (cum[k + 1] - cum[k]))
+        bad = ok & ((r < up - 0.6) | (r > down + 1.5))
+        if not bad.any() or (ok & ~bad).sum() < 2:
+            break
+        r[bad] = np.nan
+    ok = np.isfinite(r)
+    h = np.interp(cum, cum[ok], r[ok])
+    pad = np.pad(h, 2, mode='edge')
+    return np.convolve(pad, [0.1, 0.2, 0.4, 0.2, 0.1], mode='valid')
+
+
 def grow(cp, cw):
     while True:
         key = pkey(cp[-1])
@@ -1188,8 +1220,7 @@ for n, (pts, w) in enumerate(bways):
         ok = np.isfinite(seen_deck)
         unclassified = ok.sum() >= 2
     if ok.sum() >= 2:
-        hs = np.interp(cum, np.array(cum)[ok], seen_deck[ok])
-        hs = np.convolve(np.pad(hs, 1, mode='edge'), [0.25, 0.5, 0.25], mode='valid')
+        hs = even_deck(cum, seen_deck)
     else:
         ha, hb = ground(*cp[0]), ground(*cp[-1])
         hs = [ha + (hb - ha) * c / cum[-1] for c in cum]
@@ -1199,6 +1230,31 @@ for n, (pts, w) in enumerate(bways):
                 hs[n_] = max(hs[n_], ground(*p) + 3)
     hs = [max(h, ground(*p)) for h, p in zip(hs, cp)]
     chains.append((cp, cw, hs, unclassified))
+
+# Where bridges meet (a ramp leaving a viaduct, two ramps joining), each was evened out on its own: bring their ends to
+# one height, the mean of theirs, easing each into it over its last JOIN metres.
+JOIN = 40
+meet = {}
+for n, (cp, cw, hs, _) in enumerate(chains):
+    for e in (0, -1):
+        meet.setdefault(pkey(cp[e]), []).append((n, e))
+for key, at_ in meet.items():
+    if len(at_) < 2:
+        continue
+    target = sum(chains[n][2][e] for n, e in at_) / len(at_)
+    for n, e in at_:
+        cp, cw, hs, un = chains[n]
+        hs = list(hs)
+        off = target - hs[e]
+        cum = [0]
+        for a, b in zip(cp, cp[1:]):
+            cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+        for k in range(len(hs)):
+            d = cum[k] if e == 0 else cum[-1] - cum[k]
+            if d < JOIN:
+                t = 1 - d / JOIN
+                hs[k] += off * t * t * (3 - 2 * t)
+        chains[n] = (cp, cw, hs, un)
 
 # Build the land up to meet each bridge's ends, as the real approaches are: the survey's ground runs
 # down into the river or freeway the bridge crosses for a little way past its ends.
@@ -1226,6 +1282,33 @@ for cp, cw, hs, unclassified in chains:
         for t in range(0, APPROACH + 1, 4):
             k = t / APPROACH
             raise_ground(e[0] + ox * t, e[1] + oz * t, h_end + (far - h_end) * k * k * (3 - 2 * k), w / 2 + 2)
+# A deck end that doesn't meet another bridge lands on the street there, which is on the ground. The ground was built up
+# to meet it (above), but on a 10 m grid that rarely reaches it at the very end: bring the end down onto the ground,
+# easing it over its last metres (no more than 40, nor half its length) as a ramp would, at no more than 8%. An end too
+# far over the ground for that (a deck whose continuation OpenStreetMap doesn't call a bridge) is left be.
+landed = 0
+for n, (cp, cw, hs, un) in enumerate(chains):
+    hs = list(hs)
+    cum = [0]
+    for a, b in zip(cp, cp[1:]):
+        cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    for e in (0, -1):
+        if len(meet.get(pkey(cp[e]), ())) > 1:
+            continue
+        drop = hs[e] - (ground(*cp[e]) + 0.03)
+        room = min(40, cum[-1] / 2)
+        if not 0.25 < drop <= max(1.5, 0.08 * room):
+            continue
+        span = min(room, max(8, drop / 0.08))
+        for k in range(len(hs)):
+            d = cum[k] if e == 0 else cum[-1] - cum[k]
+            if d < span:
+                t = 1 - d / span
+                hs[k] = max(ground(*cp[k]), hs[k] - drop * t * t * (3 - 2 * t))
+        landed += 1
+    chains[n] = (cp, cw, hs, un)
+print('deck ends brought down onto the ground', landed, flush=True)
+
 # Piers about every 30 m where the deck is well up, never in the street or path the bridge crosses, nor under a bridge
 # modelled whole as a hero (HERO_BRIDGES: its own piers and arches are in heroes/).
 HERO_BRIDGES = {23115958}            # the Stone Arch Bridge (heroes/model_stone_arch.py)
