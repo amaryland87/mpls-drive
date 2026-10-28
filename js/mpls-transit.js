@@ -1,5 +1,5 @@
 // [Mpls] The METRO Blue and Green Lines: their trains running to Metro Transit's timetable (data/transit.json, baked by
-// tools/mpls-drive/bake_transit.py from its GTFS), and the poles and wire over their tracks. The clock is the time of
+// tools/bake_transit.py from its GTFS), and the poles and wire over their tracks. The clock is the time of
 // day the sky shows (lighting.js presets), running on in real time from it; the day is today's (a weekday, a Saturday
 // or a Sunday in Minneapolis). Each train is three Siemens S70 cars, 28.6 m long, that follow the track round the
 // curves, stand at the stations for their dwell and keep to the right of the line's centre. Trains are drawn, not

@@ -1,6 +1,6 @@
 """Build Mpls Drive's facade and roof textures: one texture array, a layer for each of LAYERS.
 
-    .venv/bin/python make_textures.py ../../public/mpls-drive/tex
+    .venv/bin/python make_textures.py ../tex
 
 Brick, concrete and gravel are CC0 photo-scanned materials from ambientCG
 (ambientcg.com), downloaded once into osm-cache/textures/. Windows, doors,

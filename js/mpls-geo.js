@@ -1,4 +1,4 @@
-// Minneapolis's city geometry, from the baked tiles in city/ (tools/mpls-drive/bake_tiles.py): the big
+// Minneapolis's city geometry, from the baked tiles in city/ (tools/bake_tiles.py): the big
 // buildings, houses, garages, fences, street signs, streets with their curbs, sidewalks and paint, street lamp spots
 // and bridge decks. Pure JavaScript with no three.js objects, so it runs in mpls-worker.js: each piece comes back as
 // flat typed arrays that the main thread (mpls-city.js) only has to wrap in a BufferGeometry and upload.
@@ -55,7 +55,7 @@ function seat(pts) {
 }
 
 /* -------------------------------- Facades --------------------------------
-   Walls and roofs share one texture array of facades (tex/, tools/mpls-drive/make_textures.py): brick
+   Walls and roofs share one texture array of facades (tex/, tools/make_textures.py): brick
    and concrete with a window per bay and per floor, glass curtain walls, storefronts, clapboard, shingles.          */
 export const LAYER = {
   brickRed: 0, brickLite: 1, concRibbon: 2, glass: 3, storefront: 4, sidingWin: 5, siding: 6, garageDoor: 7,
@@ -786,7 +786,7 @@ function furnitureGeo(G, kind, x, z, ang) {
 }
 
 /**
- * A hero building (tools/mpls-drive/hero_house.py): one real building modelled in detail from the full LiDAR survey
+ * A hero building (tools/hero_house.py): one real building modelled in detail from the full LiDAR survey
  * and an aerial photo, triangle by triangle, standing on the ground at its centre.
  */
 function heroGeo(G, S, hx) {

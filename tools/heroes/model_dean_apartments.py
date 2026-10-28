@@ -38,7 +38,7 @@ from hero_kit import L, Mesh, game_ground
 from footprints import m
 
 CACHE = os.path.join(os.path.dirname(HERE), 'osm-cache')
-CITY = os.path.join(HERE, '..', '..', '..', 'public', 'mpls-drive', 'city')
+CITY = os.path.join(HERE, '..', '..', 'city')
 
 ROOF = 11.65              # the roof membrane, above the ground at the building's centre
 PARAPET = 12.4            # top of the parapet coping

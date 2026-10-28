@@ -1,6 +1,6 @@
 // The traffic on Minneapolis's streets: Slop New York's traffic.js, cars, buses and their drivers unchanged, on a road
 // network that road-network.js builds from Minneapolis's street centrelines (data/roads.json, baked by
-// tools/mpls-drive/bake_roads.mjs) instead of Manhattan's grid. The corners OpenStreetMap has traffic signals at get
+// tools/bake_roads.mjs) instead of Manhattan's grid. The corners OpenStreetMap has traffic signals at get
 // them (bake_roads.mjs signals; failing those, where main streets meet), and the buses keep to Metro Transit's routes.
 import * as THREE from 'three/webgpu';
 import { GEO } from './nyc-geodata.js';

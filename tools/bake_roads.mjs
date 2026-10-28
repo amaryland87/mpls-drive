@@ -1,11 +1,11 @@
-// Minneapolis's street network for Slop New York's traffic (public/mpls-drive/js/road-network.js reads it as
-// GEO.roadGraph): every drivable street piece of the baked tiles (public/mpls-drive/city/t/*.json, made by
+// Minneapolis's street network for Slop New York's traffic (js/road-network.js reads it as
+// GEO.roadGraph): every drivable street piece of the baked tiles (city/t/*.json, made by
 // bake_tiles.py, which cuts each street at its intersections), joined where their ends meet, and the road bridges
 // (index.json br, left out of the street pieces) joined onto them where they land.
 //
-//   node tools/mpls-drive/bake_roads.mjs
+//   node tools/bake_roads.mjs
 //
-// Writes public/mpls-drive/data/roads.json:
+// Writes data/roads.json:
 //   nodes  [x, z, ...] junctions and street ends, metres (x east, z south)
 //   links  [[a, b, name, width, lanes, dir, [x, z, ...inner points], [bus route, ...]], ...] dir 1 one-way a -> b,
 //          0 two-way; the bus routes (indexing buses) that run along it
@@ -18,8 +18,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const CITY = path.join(HERE, '../../public/mpls-drive/city');
-const OUT = path.join(HERE, '../../public/mpls-drive/data/roads.json');
+const CITY = path.join(HERE, '../city');
+const OUT = path.join(HERE, '../data/roads.json');
 
 const KINDS = ['pedestrian', 'living_street', 'residential', 'unclassified', 'tertiary_link', 'secondary_link',
   'primary_link', 'trunk_link', 'motorway_link', 'tertiary', 'secondary', 'primary', 'trunk', 'motorway', 'path'];
@@ -123,7 +123,7 @@ const signals = [...new Set(signalAt.map(([x10, z10]) => nodeAt.get(`${x10},${z1
 // The bus routes: a link is on a route when the route's line runs along it (within BUS_R metres, the same way, at
 // its quarter, middle and three-quarter points)
 const BUS_R = 9;
-const transitPath = path.join(HERE, '../../public/mpls-drive/data/transit.json');
+const transitPath = path.join(HERE, '../data/transit.json');
 const buses = fs.existsSync(transitPath) ? JSON.parse(fs.readFileSync(transitPath, 'utf8')).bus : [];
 const busCells = new Map();
 buses.forEach((r, ri) => {
@@ -169,7 +169,7 @@ for (const l of links) {
 
 const round = (v) => Math.round(v * 10) / 10;
 const out = {
-  note: 'OpenStreetMap contributors (ODbL); Metro Transit GTFS. Made by tools/mpls-drive/bake_roads.mjs from public/mpls-drive/city.',
+  note: 'OpenStreetMap contributors (ODbL); Metro Transit GTFS. Made by tools/bake_roads.mjs from city/.',
   nodes: nodes.flatMap(([x, z]) => [round(x), round(z)]),
   links: links.map(([a, b, ni, w, lanes, dir, inner, bus]) => [a, b, ni, round(w), lanes, dir, inner.map(round), bus]),
   names, signals,

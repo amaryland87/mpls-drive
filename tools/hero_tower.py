@@ -52,7 +52,7 @@ MIN_AREA = 30.0                # m²: smaller pieces of a slice (spires, masts, 
 SIMPLIFY = 1.1                 # metres: outlines are simplified this far (a tower can say otherwise: simplify)
 PRISM_SIMPLIFY = 0.4           # metres: a straight tower's one outline (prism) is traced this finely
 TAPER_TOL = 0.8                # metres: a band's middle slices lie this close to the line from its first to its last
-CITY = os.path.join(HERE, '..', '..', 'public', 'mpls-drive', 'city')
+CITY = os.path.join(HERE, '..', 'city')
 
 # name: OpenStreetMap ways of its outline, its facades [(up to height m, layer, colour)], roof colour, extras
 TOWERS = {

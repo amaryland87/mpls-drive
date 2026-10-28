@@ -3,7 +3,7 @@
     .venv/bin/python bake_transit.py            # after fetch_city.py, before bake_tiles.py
 
 Reads osm-cache/city/gtfs.zip (Metro Transit's GTFS) and writes:
-  public/mpls-drive/data/transit.json
+  data/transit.json
     rail    the light rail lines through the map: [{name, color, shapes: [[x*10, z*10, ...]], patterns, trips}]
             shapes  each way the trains run, as track centrelines in game metres (x east, z south), cut to the map
                     and a little beyond
@@ -26,7 +26,7 @@ from area import X0, X1, Z0, Z1
 from footprints import m
 
 CACHE = os.path.join(HERE, 'osm-cache', 'city')
-OUT = os.path.join(HERE, '..', '..', 'public', 'mpls-drive', 'data', 'transit.json')
+OUT = os.path.join(HERE, '..', 'data', 'transit.json')
 MARGIN = 600            # metres of track kept beyond the map, so trains come in from off it
 RAIL_ROUTES = {'901', '902'}     # METRO Blue and Green Lines (906 is the airport's shuttle, off the map)
 
@@ -224,7 +224,7 @@ for rid, shp in sorted(by_route.items()):
                         shape=[round(v * 10) for p in run for v in p]))
 print('bus routes', len(bus_out), flush=True)
 
-json.dump(dict(note='Metro Transit GTFS (metrotransit.org). Made by tools/mpls-drive/bake_transit.py.',
+json.dump(dict(note='Metro Transit GTFS (metrotransit.org). Made by tools/bake_transit.py.',
                days={k: str(d) for k, d in day_of.items()}, rail=rail_out, bus=bus_out),
           open(OUT, 'w'), separators=(',', ':'))
 print('transit.json', round(os.path.getsize(OUT) / 1e6, 2), 'MB')

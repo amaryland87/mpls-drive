@@ -37,7 +37,7 @@ from hero_kit import L, Mesh, game_ground
 WAY = 23115958
 CACHE = os.path.join(os.path.dirname(HERE), 'osm-cache', 'heroes', 'stone-arch')
 LAZ = os.path.join(os.path.dirname(HERE), 'osm-cache', 'heroes', 'scout')
-CITY = os.path.join(os.path.dirname(HERE), '..', '..', 'public', 'mpls-drive', 'city')
+CITY = os.path.join(os.path.dirname(HERE), '..', 'city')
 EPT = 'https://s3-us-west-2.amazonaws.com/usgs-lidar-public/MN_CentralMissRiver_4_B22/'
 R = 6378137.0
 HALF = 4.4                       # metres either side of the line: the stone's faces

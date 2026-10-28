@@ -22,7 +22,7 @@ import { createPlaces } from './mpls-places.js';
 
 // Phones and small machines get less city at once (and a smaller facade texture).
 const LOW_POWER = Math.min(window.screen.width, window.screen.height) < 520 || (navigator.hardwareConcurrency || 8) <= 4;
-// The city's baked data (tools/mpls-drive/bake_tiles.py, make_textures.py).
+// The city's baked data (tools/bake_tiles.py, make_textures.py).
 const CITY_DATA = './city/';
 const CITY_TEX = './tex/';
 

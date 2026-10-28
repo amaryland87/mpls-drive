@@ -177,7 +177,7 @@ class Mesh:
 
 
 def game_ground(city):
-    """groundH(x, z) from the baked city (public/mpls-drive/city): the ground the game draws everything on, in metres
+    """groundH(x, z) from the baked city (city/): the ground the game draws everything on, in metres
     (mpls-geo.js groundH)."""
     idx = json.load(open(os.path.join(city, 'index.json')))
     gr, (x0, _, z0, _) = idx['gr'], idx['bounds']

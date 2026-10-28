@@ -1,6 +1,6 @@
 """Put hero buildings into the baked tiles without baking the whole city again.
 
-    .venv/bin/python place_heroes.py ../../public/mpls-drive/city 2905-dean 2915-dean
+    .venv/bin/python place_heroes.py ../city 2905-dean 2915-dean
 
 bake_tiles.py puts every heroes/NAME.json into its tile, in place of the ordinary buildings, houses, garages and trees
 inside its outline, but it needs the whole map's cache (fetch_osm.py, fetch_lidar.py). This does the same for the

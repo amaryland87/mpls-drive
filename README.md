@@ -5,7 +5,11 @@ but the city is Slop New York's, copied from commit `be65d0a`: the main loop, th
 cameras, the traffic, the sound, the HUD and the CSS. Changes to those files are marked `[Mpls]`. three.js is pinned to
 one commit of its dev branch (index.html, js/mpls-shapeutils.js).
 
-Minneapolis comes from the baked city in `city/` and `tex/` (tools/mpls-drive/bake_tiles.py, make_textures.py; the
+Play it at [sometimesfunctional.com/mpls-drive](https://sometimesfunctional.com/mpls-drive/): the portfolio's build
+takes this repo's `main` (everything but `tools/`). To run it here, serve the repo's root, e.g. `python3 -m http.server`,
+and open http://localhost:8000/.
+
+Minneapolis comes from the baked city in `city/` and `tex/` (tools/bake_tiles.py, make_textures.py; the
 OpenStreetMap extract comes from Geofabrik, or OpenStreetMap France's US Midwest one where Geofabrik can't be reached):
 
 - `js/mpls-geo.js`: Mpls Drive's city builder (buildings, houses, streets, lamps, bridges, collision), with no three.js
@@ -15,7 +19,7 @@ OpenStreetMap extract comes from Geofabrik, or OpenStreetMap France's US Midwest
 - `js/city-config.js`, `js/landmarks.js`, `js/nyc-geodata.js`: the names the engine imports from Manhattan's geography,
   with Minneapolis behind them.
 - `js/mpls-traffic.js`: Slop New York's traffic on `data/roads.json`, the street graph baked by
-  `tools/mpls-drive/bake_roads.mjs`.
+  `tools/bake_roads.mjs`.
 - `js/mpls-map.js`: the radar and full map, with NYC's controls and look.
 
 Also Minneapolis's own: `js/mpls-blocks.js` (city blocks from the street graph, for the pedestrians),
@@ -30,18 +34,18 @@ Traffic keeps to the streets: a centreline street's lanes run in straight pieces
 stand on the grass: `fitTrees` (`js/mpls-geo.js`) takes them off water and out from under bridge decks, and off the
 sidewalks onto the boulevard or the lawn behind (or a tree pit at the curb on a main street with no grass).
 
-Hero buildings (`tools/mpls-drive/heroes/`) are real buildings modelled in detail: 3800 Beard Ave S, 2905 and 2915
-Dean Parkway, and next door the Calhoun Beach Club and its apartment towers (`tools/mpls-drive/hero_massing.py`, for
+Hero buildings (`tools/heroes/`) are real buildings modelled in detail: 3800 Beard Ave S, 2905 and 2915
+Dean Parkway, and next door the Calhoun Beach Club and its apartment towers (`tools/hero_massing.py`, for
 big stepped buildings, from the LiDAR and the aerial photo) with the Club's grounds (with 2905's garage and lot, front walks out to the parkway's sidewalk, house numbers, dressed windows,
-fire escapes and the rest round the back). Downtown's towers are modelled whole from the survey by `tools/mpls-drive/hero_tower.py`:
+fire escapes and the rest round the back). Downtown's towers are modelled whole from the survey by `tools/hero_tower.py`:
 the Foshay Tower's tapering obelisk and pyramid cap with its name under it, Wells Fargo Center's setbacks and crown, and
 the IDS Center (the tower's notched corners, the Crystal Court's stepped roof, the Marquette Hotel and the low wings),
 Capella Tower with its open steel ring on the drum, City Hall's clock tower with its four clocks, the Basilica's dome and
 lantern, Rand Tower, and the Gold Medal Flour elevator under its sign. The Stone Arch Bridge's arches, piers and the steel
-truss span over the lock are traced from the survey under the deck (`tools/mpls-drive/heroes/model_stone_arch.py`). Cars a hero lists (`pk`) stand parked there, drawn by `js/mpls-parked.js`
-with the traffic's own car models, lamps dark, and solid. `tools/mpls-drive/place_heroes.py` puts one into the baked tiles without a full re-bake.
+truss span over the lock are traced from the survey under the deck (`tools/heroes/model_stone_arch.py`). Cars a hero lists (`pk`) stand parked there, drawn by `js/mpls-parked.js`
+with the traffic's own car models, lamps dark, and solid. `tools/place_heroes.py` puts one into the baked tiles without a full re-bake.
 
-Dressed from the city's own records (`tools/mpls-drive/fetch_city.py`, `bake_transit.py`):
+Dressed from the city's own records (`tools/fetch_city.py`, `bake_transit.py`):
 
 - Houses have the walls the City of Minneapolis assessor lists for their parcel (clapboard, stucco, brick or cedar
   shakes, new texture layers in `tex/`), its roof type (gable or hip), its storeys, and front porches and chimneys as

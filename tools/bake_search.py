@@ -1,6 +1,6 @@
 """Bake the address and place search for Mpls Drive.
 
-    .venv/bin/python bake_search.py ../../public/mpls-drive/city     # bake_tiles.py also runs this
+    .venv/bin/python bake_search.py ../city     # bake_tiles.py also runs this
 
 Reads osm-cache/search.json and roads_all.json (from fetch_osm.py) and writes
 search.json:

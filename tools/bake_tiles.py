@@ -6,8 +6,8 @@
     .venv/bin/python fetch_ground.py             # optional: the lie of the land (needs fetch_lidar.py's cache)
     .venv/bin/python fetch_city.py               # optional: walls, roofs, lights, hydrants, pavement, bike lanes
     .venv/bin/python bake_transit.py             # optional: the bus stops (and the trains' schedule)
-    .venv/bin/python bake_tiles.py ../../public/mpls-drive/city
-    .venv/bin/python make_textures.py ../../public/mpls-drive/tex
+    .venv/bin/python bake_tiles.py ../city
+    .venv/bin/python make_textures.py ../tex
 
 The map (see area.py) is cut into 1 km tiles. For each tile i_j this writes
   t/i_j.jpg    the ground, 1024 px (about 1 m a pixel), with soft occlusion
