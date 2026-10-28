@@ -33,7 +33,9 @@ sidewalks onto the boulevard or the lawn behind (or a tree pit at the curb on a 
 Hero buildings (`tools/mpls-drive/heroes/`) are real buildings modelled in detail: 3800 Beard Ave S, 2905 and 2915
 Dean Parkway, and next door the Calhoun Beach Club and its apartment towers (`tools/mpls-drive/hero_massing.py`, for
 big stepped buildings, from the LiDAR and the aerial photo) with the Club's grounds (with 2905's garage and lot, front walks out to the parkway's sidewalk, house numbers, dressed windows,
-fire escapes and the rest round the back). Cars a hero lists (`pk`) stand parked there, drawn by `js/mpls-parked.js`
+fire escapes and the rest round the back). Downtown's towers are modelled whole from the survey by `tools/mpls-drive/hero_tower.py`:
+the Foshay Tower's tapering obelisk and pyramid cap with its name under it, Wells Fargo Center's setbacks and crown, and
+the IDS Center (the tower's notched corners, the Crystal Court's stepped roof, the Marquette Hotel and the low wings). Cars a hero lists (`pk`) stand parked there, drawn by `js/mpls-parked.js`
 with the traffic's own car models, lamps dark, and solid. `tools/mpls-drive/place_heroes.py` puts one into the baked tiles without a full re-bake.
 
 Dressed from the city's own records (`tools/mpls-drive/fetch_city.py`, `bake_transit.py`):
