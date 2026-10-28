@@ -642,7 +642,7 @@ function lampSpots(r, out) {
   const cum = arcLengths(pts), L = cum[cum.length - 1], s0 = t010 / 10 + 4, s1 = L - t110 / 10 - 4;
   if (s1 - s0 < 6) return;
   const hw = w10 / 20, main = kind === 'primary' || kind === 'secondary' || kind === 'tertiary';
-  const gap = main ? 34 : 48, off = main ? hw + 0.7 : hw + 1.3;
+  const gap = main ? 70 : 100, off = main ? hw + 0.7 : hw + 1.3;   // [Mpls] NYC's 34 and 48: fewer lamps
   const sides = main ? [1, -1] : [(cls + n) % 2 ? 1 : -1];
   for (const side of sides) {
     for (let s = s0 + (side < 0 ? gap / 2 : 0) + ((s1 - s0) % gap) / 2; s <= s1; s += gap) {
@@ -1079,7 +1079,14 @@ export function buildDetail(T, atlas) {
   // York's (lampSpots: the lights the city doesn't own, Xcel Energy's, aren't in its data)
   const lamps = [];
   // (lamp angles turn the arm, +x, by a about up: towards (cos a, -sin a); the bake's point at the street, (cos, sin))
-  for (const [x10, z10, a100, style] of T.lp) lamps.push(x10 / 10, z10 / 10, -a100 / 100, style);
+  // [Mpls] Not all of them, though: none within LAMP_GAP of one already standing (rows of lanterns thinned out)
+  const LAMP_GAP = 22, kept = [];
+  for (const [x10, z10, a100, style] of T.lp) {
+    const x = x10 / 10, z = z10 / 10;
+    if (kept.some(([kx, kz]) => Math.abs(kx - x) < LAMP_GAP && Math.abs(kz - z) < LAMP_GAP && Math.hypot(kx - x, kz - z) < LAMP_GAP)) continue;
+    kept.push([x, z]);
+    lamps.push(x, z, -a100 / 100, style);
+  }
   const lit = new Map();
   for (const [x10, z10] of T.lp) {
     const key = Math.floor(x10 / 400) * 100000 + Math.floor(z10 / 400);
@@ -1162,16 +1169,184 @@ export function waterArrays(surface, n, x0, z0, tile, step = 2) {
   return { position, normal };
 }
 
+/**
+ * [Mpls] Street lamps off the roadways (a piece's detail.lamps, [x, z, angle, fixture] flat). The city's lights were put
+ * beside OpenStreetMap's streets, and the evenly spaced ones beside their own street, but either can still stand in a
+ * street as drawn: a cross street near a corner, the other roadway of a divided road, a street wider than mapped. A lamp
+ * in one goes out past its curb (the side it's on; at the very middle, back from where its arm reaches), up to three
+ * times, as one street can push it into the next; one still in a street after that goes. sidewalkAt is
+ * buildSidewalks()'s (mpls-blocks.js), for the streets of the traffic's graph. Rewrites detail.lamps; returns how many
+ * moved and went.
+ */
+export function fitLamps(detail, T, sidewalkAt) {
+  const CLEAR = 0.4, OUT = 0.8;               // within this of a curb is in the street; this past it is clear of it
+  const segs = [];
+  for (const r of T.rd) {
+    if (ROAD_KINDS[r[0]] === 'path') continue;
+    const pts = roadPoints(r), hw = r[1] / 20;
+    for (let k = 0; k + 1 < pts.length; k++) segs.push({ ax: pts[k][0], az: pts[k][1], bx: pts[k + 1][0], bz: pts[k + 1][1], hw });
+  }
+  const roadOf = (x, z) => {
+    let best = null;
+    for (const s of segs) {
+      const dx = s.bx - s.ax, dz = s.bz - s.az;
+      const t = clamp(((x - s.ax) * dx + (z - s.az) * dz) / (dx * dx + dz * dz || 1), 0, 1);
+      const px = s.ax + dx * t, pz = s.az + dz * t, r = Math.hypot(x - px, z - pz);
+      if (r - s.hw < CLEAR && (!best || r - s.hw < best.r - best.hw)) best = { hw: s.hw, px, pz, r };
+    }
+    return best || sidewalkAt?.roadOf?.(x, z) || null;
+  };
+  const L = detail.lamps, out = [];
+  let moved = 0, gone = 0;
+  for (let i = 0; i < L.length; i += 4) {
+    let x = L[i], z = L[i + 1], clear = false;
+    for (let tries = 0; tries < 4; tries++) {
+      const on = roadOf(x, z);
+      if (!on) { clear = true; break; }
+      if (tries === 3) break;
+      // the arm reaches out over the street towards (cos a, -sin a): a lamp at its very middle goes back the other way
+      let ux = x - on.px, uz = z - on.pz;
+      if (on.r < 1e-3) { ux = -Math.cos(L[i + 2]); uz = Math.sin(L[i + 2]); } else { ux /= on.r; uz /= on.r; }
+      x = on.px + ux * (on.hw + OUT); z = on.pz + uz * (on.hw + OUT);
+    }
+    if (!clear) { gone++; continue; }
+    if (x !== L[i] || z !== L[i + 1]) moved++;
+    out.push(x, z, L[i + 2], L[i + 3]);
+  }
+  detail.lamps = Float32Array.from(out);
+  return { moved, gone };
+}
+
 /* -------------------------------- Bridges --------------------------------
    Every bridge OpenStreetMap knows, over water, freeways or rail, as straight deck pieces from index.json. Each runs
-   evenly between the heights baked for its two ends, which meet the ground where it lands.                         */
+   evenly between the heights baked for its two ends, which meet the ground where it lands.
+   [Mpls] index.json keeps the pieces' ends to the whole metre and their heights to 10 cm, so a deck read straight off
+   it zigzags a little at every joint (pieces are about 7 m) and climbs in uneven steps. The pieces that run on from one
+   another are put back together into their decks, and each deck's line and heights smoothed (its ends stay where they
+   are, so decks meeting there still meet). A deck that ends on another one partway along (a ramp onto a viaduct) is
+   brought to that one's height there; one that ends a little over the street is brought down onto it. Each piece
+   carries the mitres at its two ends (na, nb: the way out to the side, scaled to meet the next piece's), so the decks
+   are drawn as one unbroken ribbon.                                                                               */
+const DECK_JOIN = 40;          // metres a deck eases over to meet another (or the ground)
 export function bridgeList(br8) {
-  const out = [];
+  const chains = [];
+  let c = null;
   for (let i = 0; i < br8.length; i += 8) {
     const [ax, az, bx, bz, w, ha10, hb10, pier] = br8.slice(i, i + 8);
-    const L = Math.hypot(bx - ax, bz - az);
-    if (L < 0.5) continue;
-    out.push({ ax, az, ux: (bx - ax) / L, uz: (bz - az) / L, L, w, ha: ha10 / 10, hb: hb10 / 10, pier, arch: L > 180 && (i / 8) % 2 === 0 });
+    if (!c || c.ex !== ax || c.ez !== az) {
+      c = { ex: ax, ez: az, x: [ax], z: [az], h: [ha10 / 10], w: [], pier: [], arch: [] };
+      chains.push(c);
+    }
+    if (Math.hypot(bx - ax, bz - az) < 0.5) continue;
+    c.ex = bx; c.ez = bz;
+    c.x.push(bx); c.z.push(bz); c.h.push(hb10 / 10); c.w.push(w); c.pier.push(pier);
+    c.arch.push(Math.hypot(bx - ax, bz - az) > 180 && (i / 8) % 2 === 0);
+  }
+  const decks = chains.filter((d) => d.x.length >= 2);
+  const key = (x, z) => x * 100003 + z;
+  const endCount = new Map();
+  for (const d of decks) for (const k of [key(d.x[0], d.z[0]), key(d.ex, d.ez)]) endCount.set(k, (endCount.get(k) || 0) + 1);
+
+  // The line: each joint pulled toward its neighbours (no more than a metre: the rounding is half that), and the heights
+  // likewise, the ends held.
+  for (const d of decks) {
+    const n = d.x.length, x0 = d.x.slice(), z0 = d.z.slice();
+    for (let it = 0; it < 4; it++) {
+      const x = d.x.slice(), z = d.z.slice(), h = d.h.slice();
+      for (let k = 1; k < n - 1; k++) {
+        d.x[k] = 0.5 * x[k] + 0.25 * (x[k - 1] + x[k + 1]);
+        d.z[k] = 0.5 * z[k] + 0.25 * (z[k - 1] + z[k + 1]);
+        d.h[k] = 0.5 * h[k] + 0.25 * (h[k - 1] + h[k + 1]);
+      }
+    }
+    for (let k = 1; k < n - 1; k++) {
+      const dx = d.x[k] - x0[k], dz = d.z[k] - z0[k], m = Math.hypot(dx, dz);
+      if (m > 1) { d.x[k] = x0[k] + dx / m; d.z[k] = z0[k] + dz / m; }
+    }
+    d.cum = [0];
+    for (let k = 1; k < n; k++) d.cum.push(d.cum[k - 1] + Math.hypot(d.x[k] - d.x[k - 1], d.z[k] - d.z[k - 1]));
+  }
+  const ease = (d, end, off, span) => {
+    const L = d.cum[d.cum.length - 1];
+    for (let k = 0; k < d.h.length; k++) {
+      const dist = end === 0 ? d.cum[k] : L - d.cum[k];
+      if (dist < span) { const t = 1 - dist / span; d.h[k] += off * t * t * (3 - 2 * t); }
+    }
+  };
+
+  // Ends on another deck partway along: what's under each such end, from the decks as they are before any is moved.
+  const CELL = 32, cells = new Map();
+  decks.forEach((d, di) => {
+    for (let k = 0; k + 1 < d.x.length; k++) {
+      const ck = Math.floor((d.x[k] + d.x[k + 1]) / 2 / CELL) * 100000 + Math.floor((d.z[k] + d.z[k + 1]) / 2 / CELL);
+      if (!cells.has(ck)) cells.set(ck, []);
+      cells.get(ck).push([di, k]);
+    }
+  });
+  /** The height of the deck other than this one under (x, z) that's nearest h, within 3 m of it, or null. */
+  const deckUnder = (x, z, self, h) => {
+    let best = null;
+    for (let i = Math.floor(x / CELL) - 1; i <= Math.floor(x / CELL) + 1; i++) {
+      for (let j = Math.floor(z / CELL) - 1; j <= Math.floor(z / CELL) + 1; j++) {
+        for (const [di, k] of cells.get(i * 100000 + j) || []) {
+          if (di === self) continue;
+          const d = decks[di], L = d.cum[k + 1] - d.cum[k];
+          if (L < 0.01) continue;
+          const ux = (d.x[k + 1] - d.x[k]) / L, uz = (d.z[k + 1] - d.z[k]) / L, dx = x - d.x[k], dz = z - d.z[k];
+          const t = dx * ux + dz * uz;
+          if (t < -0.5 || t > L + 0.5 || Math.abs(-dx * uz + dz * ux) > d.w[k] / 2) continue;
+          const on = d.h[k] + (d.h[k + 1] - d.h[k]) * clamp(t / L, 0, 1);
+          if (Math.abs(on - h) < 3 && (best === null || Math.abs(on - h) < Math.abs(best - h))) best = on;
+        }
+      }
+    }
+    return best;
+  };
+  // Twice: an end brought to a deck that was itself brought to another settles on the second pass
+  for (let pass = 0; pass < 2; pass++) {
+    const moves = [];
+    decks.forEach((d, di) => {
+      for (const end of [0, -1]) {
+        const k = end === 0 ? 0 : d.x.length - 1;
+        if (endCount.get(key(end === 0 ? d.x[0] : d.ex, end === 0 ? d.z[0] : d.ez)) > 1) continue;   // meets another's end
+        const L = d.cum[d.cum.length - 1], span = Math.min(DECK_JOIN, L / 2), h = d.h[k];
+        const on = deckUnder(d.x[k], d.z[k], di, h);
+        if (on !== null) {
+          if (Math.abs(on - h) > 0.05) moves.push([d, end, on - h, span]);
+          continue;
+        }
+        // Or a little over the street: down onto it, at no more than 10%
+        const drop = h - (groundH(d.x[k], d.z[k]) + 0.03);
+        if (drop > 0.25 && drop <= 0.1 * span) moves.push([d, end, -drop, Math.max(8, Math.min(span, drop / 0.08))]);
+      }
+    });
+    for (const [d, end, off, span] of moves) ease(d, end, off, span);
+  }
+
+  const out = [];
+  for (const d of decks) {
+    const n = d.x.length;
+    for (let k = 0; k < n; k++) d.h[k] = Math.max(d.h[k], groundH(d.x[k], d.z[k]));
+    // The way out to the side at each joint: the mitre between the pieces either side (or square, at a hairpin)
+    const seg = [];
+    for (let k = 0; k + 1 < n; k++) {
+      const L = d.cum[k + 1] - d.cum[k];
+      seg.push({ L, ux: (d.x[k + 1] - d.x[k]) / L, uz: (d.z[k + 1] - d.z[k]) / L });
+    }
+    const mitre = (a, b) => {
+      const ax = -a.uz, az = a.ux, bx = -b.uz, bz = b.ux, dot = 1 + ax * bx + az * bz;
+      return dot < 0.5 ? null : [(ax + bx) / dot, (az + bz) / dot];
+    };
+    for (let k = 0; k + 1 < n; k++) {
+      const { L, ux, uz } = seg[k];
+      if (L < 0.01) continue;
+      const own = [-uz, ux];
+      out.push({
+        ax: d.x[k], az: d.z[k], ux, uz, L, w: d.w[k], ha: d.h[k], hb: d.h[k + 1], pier: d.pier[k], arch: d.arch[k],
+        na: (k > 0 && seg[k - 1].L >= 0.01 && mitre(seg[k - 1], seg[k])) || own,
+        nb: (k + 2 < n && seg[k + 1].L >= 0.01 && mitre(seg[k], seg[k + 1])) || own,
+      });
+    }
   }
   return out;
 }
@@ -1195,10 +1370,14 @@ export function bridgeArrays(list) {
   const deckCol = color('#a7adb3'), railCol = color('#eceae4');
   const archCol = color('#4f7fb3'), pierCol = color('#c9c2b2'), sideCol = color('#8f959b');
   for (const br of list) {
-    const { ax, az, ux, uz, L, w } = br;
+    const { ax, az, ux, uz, L, w, na, nb } = br;
     const nx = -uz, nz = ux;
     const steps = Math.max(1, Math.ceil(L / 6));
-    const P = (t, s, dy) => [ax + ux * t + nx * s, bridgeHeightAt(br, t) + dy, az + uz * t + nz * s];
+    // [Mpls] Out to the side along the mitres at its ends, so it meets the pieces either side edge to edge
+    const P = (t, s, dy) => {
+      const f = t / L, mx = na[0] + (nb[0] - na[0]) * f, mz = na[1] + (nb[1] - na[1]) * f;
+      return [ax + ux * t + mx * s, bridgeHeightAt(br, t) + dy, az + uz * t + mz * s];
+    };
     for (let k = 0; k < steps; k++) {
       const t0 = L * k / steps, t1 = L * (k + 1) / steps;
       const hw = w / 2;

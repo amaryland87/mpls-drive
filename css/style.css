@@ -396,6 +396,31 @@ body.hud-minimized .toolbar > :not(#btn-toggle-hud) {
 #hud-fps.fps-warn { color: var(--warn); }
 #hud-fps.fps-bad { color: var(--bad); }
 
+/* [Mpls] How many people have played (js/play-count.js), under the brand */
+.hud-top-left {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.play-count {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.play-count[hidden] { display: none; }
+
+.play-count-n {
+  font-weight: 650;
+  color: var(--text-2);
+}
+
 /* ------------------------------------------------------------------------------------------------------------------
    Top right: toolbar (time of day, teleport, map, clean view)
    ------------------------------------------------------------------------------------------------------------------ */

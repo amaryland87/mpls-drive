@@ -169,5 +169,16 @@ export function buildSidewalks(graph) {
     }
     return null;
   };
+  /** [Mpls] The street whose roadway (x, z) is in, the nearest if more than one: { hw, px, pz, r } as walkOf's, or null. */
+  sidewalkAt.roadOf = (x, z) => {
+    let best = null;
+    for (const s of cells.get(Math.floor(x / WALK_CELL) * 100000 + Math.floor(z / WALK_CELL)) || []) {
+      const dx = s.bx - s.ax, dz = s.bz - s.az;
+      const t = Math.max(0, Math.min(1, ((x - s.ax) * dx + (z - s.az) * dz) / (dx * dx + dz * dz || 1)));
+      const px = s.ax + dx * t, pz = s.az + dz * t, r = Math.hypot(x - px, z - pz);
+      if (r - s.hw < 0.3 && (!best || r - s.hw < best.r - best.hw)) best = { hw: s.hw, px, pz, r };
+    }
+    return best;
+  };
   return sidewalkAt;
 }

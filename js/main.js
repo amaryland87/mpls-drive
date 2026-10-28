@@ -15,6 +15,7 @@ import { createCity } from './mpls-city.js';
 import { createMplsTraffic } from './mpls-traffic.js';
 import { createTransit } from './mpls-transit.js';
 import { createPlaces } from './mpls-places.js';
+import { showPlayCount } from './play-count.js';
 
 // Application setup, shader warm-up and frame loop: Slop New York's main.js, with Minneapolis (mpls-city.js) in place
 // of its Manhattan. The city streams in round the camera, built off the main thread, so it is loaded before the first
@@ -80,6 +81,7 @@ async function initApp() {
   const city = await createCity({ scene, renderer, base: CITY_DATA, tex: CITY_TEX, lowPower: LOW_POWER });
   setCity(city);
   markInit('city');
+  showPlayCount(document.getElementById('play-count')); // [Mpls] the city's up: one more person has played
 
   // 4. Initialize Third-Person Controllers (Person, Car, Cyclist, Helicopter) & Multi-Camera System
   const controllerManager = new ThirdPersonControllerManager(scene, []);

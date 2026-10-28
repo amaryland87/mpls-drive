@@ -34,7 +34,7 @@ const CAR_DRIVE = {
   powerSpeed: 14.5, // Above 52 km/h, engine power limits acceleration.
   rolling: 0.18, drag: 0.0012, coast: 0.6, brake: 9,
   // [Mpls] much sharper into the turns than NYC's cab (grip 9.5, cornering 10.5, full lock 0.60 rad)
-  wheelbase: 2.76, grip: 13.5, cornering: 18, lock: 0.74, // Wheelbase (m), tire and steering acceleration limits (m/s²).
+  wheelbase: 2.76, grip: 17, cornering: 26, lock: 0.8, // Wheelbase (m), tire and steering acceleration limits (m/s²).
   // [Mpls] The handbrake (Space) locks the rear wheels: they slide, the tail comes round and the car drifts. Holding the
   // throttle through the slide keeps it going once the handbrake is let go; steering into it straightens the car out.
   handbrake: 4, driftGrip: 0.3, driftYaw: 1.7
@@ -1134,9 +1134,9 @@ class ThirdPersonControllerManager {
     // Short steps keep grip, impacts and suspension consistent at different display rates.
     const steps = Math.ceil(dt * 120);
     const step = dt / steps;
-    const steerResponse = 1 - Math.exp(-10 * step);
-    const yawResponse = 1 - Math.exp(-7 * step); // [Mpls] NYC's 5: the car answers the wheel quicker
-    const tireResponse = 1 - Math.exp(-4 * step);
+    const steerResponse = 1 - Math.exp(-14 * step); // [Mpls] NYC's 10: the wheels turn quicker
+    const yawResponse = 1 - Math.exp(-10 * step); // [Mpls] NYC's 5: the car answers the wheel quicker
+    const tireResponse = 1 - Math.exp(-6 * step); // [Mpls] NYC's 4: the tires take the car where it points sooner
     for (let i = 0; i < steps; i++) {
       const sin = Math.sin(c.heading), cos = Math.cos(c.heading);
       const vx = sin * c.speed + c.vx, vz = cos * c.speed + c.vz;
@@ -1164,7 +1164,7 @@ class ThirdPersonControllerManager {
       const yawLimit = grip / Math.max(2, Math.abs(speed)) * yawGain;
       const targetYaw = Math.max(-yawLimit, Math.min(yawLimit, speed * Math.tan(c.steerAngle) / CAR_DRIVE.wheelbase * yawGain));
       // Collision spin remains part of the yaw velocity; the tires gradually regain control.
-      const yawStep = grip * 0.65 * yawGain * step;
+      const yawStep = grip * 0.9 * yawGain * step; // [Mpls] NYC's 0.65
       c.angularVel += Math.max(-yawStep, Math.min(yawStep, (targetYaw - c.angularVel) * yawResponse));
       c.heading += c.angularVel * step;
 
