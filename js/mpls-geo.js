@@ -61,17 +61,27 @@ export const LAYER = {
   brickRed: 0, brickLite: 1, concRibbon: 2, glass: 3, storefront: 4, sidingWin: 5, siding: 6, garageDoor: 7,
   sidingDoor: 8, brickRedPlain: 9, brickLitePlain: 10, concPlain: 11, shingles: 12, gravel: 13, fence: 14, metal: 15,
   asphalt: 16, sidewalk: 17, paint: 18, grass: 19,
+  // [Mpls] houses by what the assessor says their walls are
+  stuccoWin: 20, stuccoPlain: 21, stuccoDoor: 22, brickHouseWin: 23, brickHouseDoor: 24, shakesWin: 25, shakesPlain: 26, shakesDoor: 27,
 };
 // The metres one tile of each layer covers (make_textures.py LAYERS), and the window-less version of each facade.
 const LAYER_M = [[2.4, 3.6], [2.4, 3.6], [3, 3.6], [1.5, 3.6], [4.8, 4.5], [2.4, 2.9], [2.4, 2.9], [3, 2.6],
-  [2.4, 2.9], [2.4, 3.6], [2.4, 3.6], [3, 3.6], [2, 2], [4, 4], [2.4, 1.8], [1, 1], [4, 4], [1.5, 1.5], [1, 1], [2.8, 2.8]];
-const PLAIN = [9, 10, 11, 3, 9, 6, 6, 6, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+  [2.4, 2.9], [2.4, 3.6], [2.4, 3.6], [3, 3.6], [2, 2], [4, 4], [2.4, 1.8], [1, 1], [4, 4], [1.5, 1.5], [1, 1], [2.8, 2.8],
+  [2.4, 2.9], [2.4, 2.9], [2.4, 2.9], [2.4, 2.9], [2.4, 2.9], [2.4, 2.9], [2.4, 2.9], [2.4, 2.9]];
+const PLAIN = [9, 10, 11, 3, 9, 6, 6, 6, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 21, 21, 9, 9, 26, 26, 26];
+// [Mpls] A house's walls (bake_tiles.py: flags >> 2): window, door and plain layers for clapboard, stucco, brick, shakes
+const HOUSE_LAYERS = [[LAYER.sidingWin, LAYER.sidingDoor], [LAYER.stuccoWin, LAYER.stuccoDoor], [LAYER.brickHouseWin, LAYER.brickHouseDoor],
+  [LAYER.shakesWin, LAYER.shakesDoor]];
 
 const ROOF_GREY = ['#a8a59e', '#b9b5ad', '#9d9a94', '#c4c0b6', '#8f8d88'].map(color);
-const PAL = { walls: [], houseWall: [], houseRoof: [], boxWall: [] };     // filled from index.json
+const PAL = { walls: [], houseWall: [], houseRoof: [], boxWall: [], roofs: [] };     // filled from index.json
 export function setPalette(index) {
-  for (const k of Object.keys(PAL)) PAL[k] = index[k].map(color);
+  for (const k of Object.keys(PAL)) PAL[k] = (index[k] || []).map(color);
 }
+// [Mpls] Roof colours come from the aerial photo (bake_tiles.py), which sees a roof's colour; shingles and gravel are
+// darker than that on average in the texture array, so these bring them back up to it.
+const SHINGLE_LIFT = 1.35, GRAVEL_LIFT = 1.5;
+const lifted = (c, k) => [Math.min(1, c[0] * k), Math.min(1, c[1] * k), Math.min(1, c[2] * k)];
 const WHITE = color('#f2f1ec'), CONCRETE = color('#c9c5bc'), BRICK = color('#ffffff');
 
 /** A small deterministic random sequence, so the same building always gets the same details. */
@@ -236,7 +246,8 @@ function building(G, S, b) {
   G.seat(rings[0]);
   const col = PAL.walls[tint];
   const R = rand(cx * 31 + cz * 17);
-  const roofCol = ROOF_GREY[Math.floor(R() * ROOF_GREY.length)];
+  const seen = (flags >> 2) - 1;                       // [Mpls] the roof's colour in the aerial photo
+  const roofCol = seen >= 0 && PAL.roofs[seen] ? lifted(PAL.roofs[seen], GRAVEL_LIFT) : ROOF_GREY[Math.floor(R() * ROOF_GREY.length)];
   const tall = H >= 50 && H0 === 0 && rings.length === 1;
   const body = tall ? H * 0.86 : H;
   for (const ring of rings) for (let i = 0; i < ring.length; i++) {
@@ -328,29 +339,33 @@ function roofGeo(G, P, W, D, eave, ridge, kind, roofCol, wallCol, wallLayer) {
   }
 }
 
-/** A house: clapboard walls with windows, a front door toward the street, its roof, maybe a porch and a chimney. */
+/**
+ * A house: walls with windows (clapboard, stucco, brick or cedar shakes, as the assessor has them), a front door toward
+ * the street, its roof (in the aerial photo's colour), maybe a porch and a chimney.
+ */
 function houseGeo(G, h) {
   const [x10, z10, a100, w10, d10, e10, r10, kind, front, wc, rc, flags] = h;
   const x = x10 / 10, z = z10 / 10, ang = a100 / 100, W = w10 / 10, D = d10 / 10, eave = e10 / 10, ridge = r10 / 10;
   const P = localFrame(x, z, ang);
-  const wallCol = PAL.houseWall[wc], roofCol = PAL.houseRoof[rc];
+  const [winLayer, doorLayer] = HOUSE_LAYERS[(flags >> 2) & 3];
+  const wallCol = PAL.houseWall[wc], roofCol = lifted(PAL.houseRoof[rc], PAL.roofs.length ? SHINGLE_LIFT : 1);
   const sides = SIDES(W, D);
   G.seat(sides.map(([a]) => { const q = P(a[0], 0, a[1]); return [q[0], q[2]]; }));
   sides.forEach(([a, b], side) => {
     const A = P(a[0], 0, a[1]), B = P(b[0], 0, b[1]);
     const pa = [A[0], A[2]], pb = [B[0], B[2]];
-    if (side !== front) { wall(G, pa, pb, 0, eave, LAYER.sidingWin, wallCol); return; }
+    if (side !== front) { wall(G, pa, pb, 0, eave, winLayer, wallCol); return; }
     // The front: a door in the middle bay of the ground floor, windows either side.
     const len = Math.hypot(pb[0] - pa[0], pb[1] - pa[1]);
     const bays = Math.max(1, Math.round(len / 2.4)), mid = Math.floor(bays / 2), gf = Math.min(eave, 2.9);
     for (let i = 0; i < bays; i++) {
       const t0 = i / bays, t1 = (i + 1) / bays;
       const p0 = [pa[0] + (pb[0] - pa[0]) * t0, pa[1] + (pb[1] - pa[1]) * t0], p1 = [pa[0] + (pb[0] - pa[0]) * t1, pa[1] + (pb[1] - pa[1]) * t1];
-      wall(G, p0, p1, 0, gf, i === mid ? LAYER.sidingDoor : LAYER.sidingWin, wallCol);
+      wall(G, p0, p1, 0, gf, i === mid ? doorLayer : winLayer, wallCol);
     }
-    if (eave > gf + 0.05) wall(G, pa, pb, gf, eave, LAYER.sidingWin, wallCol);
+    if (eave > gf + 0.05) wall(G, pa, pb, gf, eave, winLayer, wallCol);
   });
-  roofGeo(G, P, W, D, eave, ridge, kind, roofCol, wallCol, LAYER.sidingWin);
+  roofGeo(G, P, W, D, eave, ridge, kind, roofCol, wallCol, winLayer);
   const R = rand(x10 * 7 + z10 * 13);
   if ((flags & 1) && kind) {
     // A brick chimney poking through one slope.
@@ -382,7 +397,8 @@ function garageGeo(G, g) {
   const [x10, z10, a100, w10, d10, h10, wc, door] = g;
   const x = x10 / 10, z = z10 / 10, ang = a100 / 100, W = w10 / 10, D = d10 / 10, H = h10 / 10;
   const P = localFrame(x, z, ang);
-  const col = PAL.boxWall[wc], eave = Math.max(2.3, H - 0.9);
+  // [Mpls] the wall tint in the low byte, 1 + the roof's colour in the aerial photo above it (bake_tiles.py)
+  const col = PAL.boxWall[wc & 255], seen = (wc >> 8) - 1, eave = Math.max(2.3, H - 0.9);
   G.seat(SIDES(W, D).map(([a]) => { const q = P(a[0], 0, a[1]); return [q[0], q[2]]; }));
   SIDES(W, D).forEach(([a, b], side) => {
     const A = P(a[0], 0, a[1]), B = P(b[0], 0, b[1]);
@@ -393,7 +409,8 @@ function garageGeo(G, g) {
       wall(G, [A[0], A[2]], [B[0], B[2]], 0, eave, LAYER.siding, col);
     }
   });
-  roofGeo(G, P, W, D, eave, Math.max(eave + 0.5, H), 1, PAL.houseRoof[(wc + 3) % PAL.houseRoof.length], col, LAYER.siding);
+  const roofCol = seen >= 0 && PAL.houseRoof[seen] ? lifted(PAL.houseRoof[seen], SHINGLE_LIFT) : PAL.houseRoof[((wc & 255) + 3) % PAL.houseRoof.length];
+  roofGeo(G, P, W, D, eave, Math.max(eave + 0.5, H), 1, roofCol, col, LAYER.siding);
 }
 
 const FENCE_COLS = ['#b08f6a', '#9c9a94', '#eeeeea', '#8a6e52'].map(color);
@@ -436,6 +453,8 @@ const PAINT_WHITE = color('#f4f4f0'), PAINT_YELLOW = color('#f0c23a');
 // (Draped over the ground, whose triangles they don't share, so they ride a few centimetres up.)
 export const ROAD_Y = 0.07, WALK_Y = 0.09, PAINT_Y = 0.095;
 const TRAIL = color('#dcd3c0'), BIKE_PATH = color('#9fa3a5');
+// [Mpls] Bus-only lanes are painted red in Minneapolis; protected bike lanes are kept from the traffic by white posts
+const PAINT_RED = color('#a8302c'), POST_WHITE = color('#f2f2ee');
 
 /** A flat quad, wound to face up whatever order its corners come in. */
 function upQuad(G, a, b, c, d, ua, ub, uc, ud, layer, col) {
@@ -554,9 +573,13 @@ export function roadPoints(r) {
   return pts;
 }
 
-/** One street piece: its asphalt, and (stopping short of the intersections) curbs, sidewalks and markings. */
+/**
+ * One street piece: its asphalt (or [Mpls] concrete or brick, as the city's pavement map has it), and (stopping short
+ * of the intersections) curbs, sidewalks and markings, with its bike lanes as the city's bikeway map has them.
+ */
 function streetGeo(S, r) {
-  const [cls, w10, lanesTag, oneway, t010, t110] = r;
+  const [cls, w10, lanesTag, oneway, t010, t110, n] = r;
+  const surface = r[7 + n * 2] || 0, bike = r[8 + n * 2] || 0;
   const pts = roadPoints(r);
   const kind = ROAD_KINDS[cls], w = w10 / 10, hw = w / 2;
   if (kind === 'path') {
@@ -565,7 +588,10 @@ function streetGeo(S, r) {
     return;
   }
   const freeway = /^(motorway|trunk)/.test(kind), major = /^(primary|secondary|tertiary)$/.test(kind);
-  band(S.road, pts, -hw, hw, ROAD_Y, LAYER.asphalt, freeway ? ASPHALT.freeway : major ? ASPHALT.major : ASPHALT.local, 'world');
+  // Concrete and brick are laid out along the street (uv: metres along it and across it from one side), so the joints
+  // and the courses run with it
+  if (surface === 1 || surface === 2) band(surface === 1 ? S.concrete : S.brick, pts, -hw, hw, ROAD_Y, LAYER.metal, WHITE, 'along');
+  else band(S.road, pts, -hw, hw, ROAD_Y, LAYER.asphalt, freeway ? ASPHALT.freeway : major ? ASPHALT.major : ASPHALT.local, 'world');
   const cum = arcLengths(pts), L = cum[cum.length - 1];
   const s0 = t010 / 10, s1 = L - t110 / 10;
   if (s1 - s0 < 2) return;
@@ -588,6 +614,22 @@ function streetGeo(S, r) {
     // A double yellow down the middle, and dashed white between lanes on four-lane streets.
     for (const s of [-1, 1]) S.paint.strip(inner, s * 0.135, 0.13, PAINT_YELLOW);
     if (lanes >= 4) for (const s of [-1, 1]) dashes(S.paint, inner, s * hw / 2, 0.13, 3, 12, PAINT_WHITE);
+  }
+  if (bike && bike < 5 && !freeway && w > 7) {
+    // Along the curb on each side (just the right-hand one, +d, of a one-way street): a bike lane's line, a buffered
+    // lane's two, a protected lane's line and posts, or a red bus lane
+    for (const s of oneway ? [1] : [-1, 1]) {
+      if (bike === 4) { S.paint.strip(inner, s * (hw - 1.7), 3.2, PAINT_RED); continue; }
+      S.paint.strip(inner, s * (hw - 1.8), 0.15, PAINT_WHITE);
+      if (bike === 2) S.paint.strip(inner, s * (hw - 2.7), 0.15, PAINT_WHITE);
+      if (bike === 3) {
+        const c2 = arcLengths(inner), Ln = c2[c2.length - 1];
+        for (let d = 3; d < Ln - 3; d += 6) {
+          const q = subPath(inner, c2, d, d + 0.1), [ax, az] = q[0], [bx, bz] = q[q.length - 1], L = Math.hypot(bx - ax, bz - az) || 1;
+          S.posts.push(ax - (bz - az) / L * s * (hw - 2.1), az + (bx - ax) / L * s * (hw - 2.1));
+        }
+      }
+    }
   }
 }
 
@@ -662,6 +704,83 @@ function signGeo(G, B, s, atlas) {
     B.p.push(...b, ...a, ...d, ...b, ...d, ...c);
     B.uv.push(0, v0, u1, v0, u1, v1, 0, v0, u1, v1, 0, v1);
   });
+}
+
+/* --------------------------- [Mpls] Street furniture ---------------------------
+   What the city and OpenStreetMap say stands along the streets (bake_tiles.py fu): hydrants, benches, litter bins, bus
+   stop signs and shelters, Nice Ride docks, mailboxes, wooden utility poles, bike racks and the light rail's platform
+   canopies. Simple boxes in the facade array's plain layers, each turned by ang (towards the street: +x local).    */
+const FURN = {
+  hydrant: color('#d9a91c'), cap: color('#3a3c3f'), bench: color('#2f3a33'), wood: color('#8a6a4a'), bin: color('#2b2d30'),
+  sign: color('#f4f4f0'), signBand: color('#1d4f91'), steel: color('#6d7277'), glass: color('#cfe0ea'), roof: color('#3b4046'),
+  nice: color('#6cae3e'), mailbox: color('#1f4e8c'), pole: color('#6b5440'), rack: color('#8b9095'),
+};
+// Footprints for collision: [kind] = [half length along, half width across, height] (null: nothing to hit)
+export const FURN_SIZE = [[0.2, 0.2, 0.8], [0.9, 0.3, 0.9], [0.3, 0.3, 1.0], [0.05, 0.05, 2.9], [1.8, 0.8, 2.6],
+  [4, 0.4, 1.2], [0.3, 0.3, 1.2], [0.16, 0.16, 11], null, null];
+function furnitureGeo(G, kind, x, z, ang) {
+  const base = G.seat([[x, z]]);
+  const P = localFrame(x, z, ang);                  // local u: towards the street, w: along it
+  const box = (u, y, w, su, sy, sw, layer, col, top = layer) => {
+    const [bx, , bz] = P(u, 0, w);
+    boxGeo(G, bx, y, bz, su, sy, sw, ang, layer, top, col);
+  };
+  const M = LAYER.metal, C = LAYER.concPlain;
+  switch (kind) {
+    case 0:   // a fire hydrant: barrel, bonnet and two nozzles
+      box(0, 0, 0, 0.26, 0.62, 0.26, M, FURN.hydrant);
+      box(0, 0.62, 0, 0.2, 0.14, 0.2, M, FURN.cap);
+      box(0, 0.36, 0, 0.44, 0.1, 0.1, M, FURN.hydrant);
+      break;
+    case 1:   // a bench: seat and back on two legs, facing the street
+      box(-0.08, 0.42, 0, 0.42, 0.06, 1.8, M, FURN.wood);
+      box(-0.3, 0.45, 0, 0.06, 0.45, 1.8, M, FURN.wood);
+      for (const w of [-0.75, 0.75]) box(-0.1, 0, w, 0.45, 0.42, 0.06, M, FURN.bench);
+      break;
+    case 2:   // a litter bin
+      box(0, 0, 0, 0.55, 0.95, 0.55, M, FURN.bin);
+      break;
+    case 3:   // a bus stop sign: a post and a Metro Transit plate facing along the street
+      box(0, 0, 0, 0.07, 2.9, 0.07, M, FURN.steel);
+      box(0, 2.2, 0.26, 0.04, 0.6, 0.45, M, FURN.sign);
+      box(0, 2.62, 0.26, 0.045, 0.16, 0.45, M, FURN.signBand);
+      break;
+    case 4:   // a bus shelter: glass back and ends, a dark roof, a bench inside, open to the street
+      box(-0.75, 0, 0, 0.05, 2.3, 3.6, LAYER.glass, FURN.glass);
+      for (const w of [-1.8, 1.8]) box(-0.15, 0, w, 1.2, 2.3, 0.05, LAYER.glass, FURN.glass);
+      for (const [u, w] of [[-0.75, -1.8], [-0.75, 1.8], [0.45, -1.8], [0.45, 1.8]]) box(u, 0, w, 0.08, 2.4, 0.08, M, FURN.roof);
+      box(-0.15, 2.4, 0, 1.6, 0.14, 3.9, M, FURN.roof);
+      box(-0.5, 0.42, 0, 0.35, 0.06, 2.2, M, FURN.steel);
+      break;
+    case 5:   // a Nice Ride dock: the green kiosk and a row of docking posts along the curb
+      box(0, 0, -3.6, 0.45, 2.1, 0.6, M, FURN.nice);
+      box(0, 0, 0.6, 0.12, 0.08, 7.2, M, FURN.steel);
+      for (let w = -2.6; w <= 3.8; w += 0.8) box(0, 0, w, 0.12, 0.8, 0.14, M, FURN.nice);
+      break;
+    case 6:   // a blue USPS mailbox
+      box(0, 0, 0, 0.5, 1.15, 0.5, M, FURN.mailbox);
+      break;
+    case 7:   // a wooden utility pole with its crossarm
+      box(0, -0.3, 0, 0.28, 11.3, 0.28, LAYER.fence, FURN.pole);
+      box(0, 10.2, 0, 0.12, 0.12, 2.4, LAYER.fence, FURN.pole);
+      break;
+    case 8:   // a bike rack: three hoops along the walk
+      for (const w of [-0.8, 0, 0.8]) {
+        box(0, 0, w - 0.3, 0.05, 0.85, 0.05, M, FURN.rack);
+        box(0, 0, w + 0.3, 0.05, 0.85, 0.05, M, FURN.rack);
+        box(0, 0.82, w, 0.05, 0.05, 0.65, M, FURN.rack);
+      }
+      break;
+    case 9: { // a light rail platform's canopy, 30 m along the track: posts every 6 m and a roof
+      const Q = localFrame(x, z, ang);
+      for (let u = -15; u <= 15; u += 6) { const [bx, , bz] = Q(u, 0, 0); boxGeo(G, bx, 0, bz, 0.2, 3.3, 0.2, ang, M, M, FURN.steel); }
+      const [bx, , bz] = Q(0, 0, 0);
+      boxGeo(G, bx, 3.3, bz, 31, 0.18, 3.4, ang, M, M, FURN.roof);
+      boxGeo(G, bx, 0, bz, 30, 0.3, 3.0, ang, C, C, CONCRETE);
+      break;
+    }
+  }
+  return base;
 }
 
 /**
@@ -753,7 +872,7 @@ export function buildTile(x0, z0, tile, data, isStadium) {
     const i = clamp(Math.floor((x - x0) / PIECE), 0, n - 1), j = clamp(Math.floor((z - z0) / PIECE), 0, n - 1);
     let T = pieces.get(j * 8 + i);
     if (!T) {
-      T = { key: j * 8 + i, cx: x0 + (i + 0.5) * PIECE, cz: z0 + (j + 0.5) * PIECE, G: new Geo(), h: [], g: [], t: [], f: [], s: [], rd: [], jn: [], cw: [] };
+      T = { key: j * 8 + i, cx: x0 + (i + 0.5) * PIECE, cz: z0 + (j + 0.5) * PIECE, G: new Geo(), h: [], g: [], t: [], f: [], s: [], rd: [], jn: [], cw: [], lp: [], fu: [] };
       pieces.set(j * 8 + i, T);
     }
     return T;
@@ -811,9 +930,28 @@ export function buildTile(x0, z0, tile, data, isStadium) {
   }
   for (let i = 0; i < (data.jn || []).length; i += 3) pieceAt(data.jn[i] / 10, data.jn[i + 1] / 10).jn.push(data.jn.slice(i, i + 3));
   for (let i = 0; i < (data.cw || []).length; i += 4) pieceAt(data.cw[i] / 10, data.cw[i + 1] / 10).cw.push(data.cw.slice(i, i + 4));
+  // [Mpls] The city's street lights (bake_tiles.py lp: x, z, angle to the street, fixture) and the street furniture
+  // (fu: kind, x, z, angle), solid where they'd stop a car
+  for (let i = 0; i < (data.lp || []).length; i += 4) {
+    const l = data.lp.slice(i, i + 4);
+    pieceAt(l[0] / 10, l[1] / 10).lp.push(l);
+    S.add(l[0] / 10, l[1] / 10, l[0] / 10, l[1] / 10, 0.14, groundH(l[0] / 10, l[1] / 10) + 6);
+  }
+  for (let i = 0; i < (data.fu || []).length; i += 4) {
+    const f = data.fu.slice(i, i + 4), x = f[1] / 10, z = f[2] / 10, size = FURN_SIZE[f[0]];
+    pieceAt(x, z).fu.push(f);
+    if (!size) continue;
+    if (f[0] === 4 || f[0] === 5 || f[0] === 1) {
+      // its back (or its row of posts) as a wall along the street
+      const a = f[3] / 100, u = f[0] === 4 ? -0.75 : 0, ca = Math.cos(a), sa = Math.sin(a), hw = size[0];
+      const P = (w) => [x + u * ca - w * sa, z + u * sa + w * ca];
+      const [p, q] = [P(-hw), P(hw)];
+      S.add(p[0], p[1], q[0], q[1], 0.15, groundH(x, z) + size[2]);
+    } else S.add(x, z, x, z, size[0], groundH(x, z) + size[2]);
+  }
   const out = [];
   for (const T of pieces.values()) {
-    out.push({ key: T.key, cx: T.cx, cz: T.cz, city: T.G.arrays(), detail: T.h.length + T.g.length + T.t.length + T.f.length + T.s.length + T.rd.length > 0 });
+    out.push({ key: T.key, cx: T.cx, cz: T.cz, city: T.G.arrays(), detail: T.h.length + T.g.length + T.t.length + T.f.length + T.s.length + T.rd.length + T.lp.length + T.fu.length > 0 });
     T.G = null;
   }
   const corners = [];
@@ -912,8 +1050,8 @@ function mapShapes(data) {
 }
 
 /**
- * A piece's detail: houses, garages, fences and signs (city), streets (road, walk, curb, trail, paint), sign blades
- * (signs), lamp spots ([x, z, angle] flat) and tree sites ([x, y, z, h, r] flat).
+ * A piece's detail: houses, garages, fences, signs and street furniture (city), streets (road, concrete, brick, walk,
+ * curb, trail, paint), sign blades (signs), lamp spots ([x, z, angle, fixture] flat) and tree sites ([x, y, z, h, r] flat).
  */
 export function buildDetail(T, atlas) {
   const G = new Geo();
@@ -922,12 +1060,43 @@ export function buildDetail(T, atlas) {
   T.f.forEach((f, n) => fenceGeo(G, f, n + f[2]));
   const B = { p: [], uv: [] };
   if (atlas) for (const s of T.s) signGeo(G, B, s, atlas);
-  const S = { road: new Geo(true), walk: new Geo(true), curb: new Geo(true), trail: new Geo(true), paint: new PaintGeo() };
+  for (const [kind, x10, z10, a100] of T.fu) furnitureGeo(G, kind, x10 / 10, z10 / 10, a100 / 100);
+  const S = {
+    road: new Geo(true), walk: new Geo(true), curb: new Geo(true), trail: new Geo(true), paint: new PaintGeo(),
+    concrete: new Geo(true), brick: new Geo(true), posts: [],
+  };
   for (const r of T.rd) streetGeo(S, r);
+  // protected bike lanes' posts
+  for (let k = 0; k < S.posts.length; k += 2) {
+    G.seat([[S.posts[k], S.posts[k + 1]]]);
+    boxGeo(G, S.posts[k], 0, S.posts[k + 1], 0.1, 0.9, 0.1, 0, LAYER.metal, LAYER.metal, POST_WHITE);
+  }
   for (const [x, z, r] of T.jn) junctionGeo(S.road, x / 10, z / 10, r / 10);
   for (const [x, z, a, w] of T.cw) crosswalkGeo(S.paint, x / 10, z / 10, a / 100, w / 10);
+  // [Mpls] The city's own lights where it has them; along a street with none of them near, lamps spaced as Slop New
+  // York's (lampSpots: the lights the city doesn't own, Xcel Energy's, aren't in its data)
   const lamps = [];
-  for (const r of T.rd) lampSpots(r, lamps);
+  // (lamp angles turn the arm, +x, by a about up: towards (cos a, -sin a); the bake's point at the street, (cos, sin))
+  for (const [x10, z10, a100, style] of T.lp) lamps.push(x10 / 10, z10 / 10, -a100 / 100, style);
+  const lit = new Map();
+  for (const [x10, z10] of T.lp) {
+    const key = Math.floor(x10 / 400) * 100000 + Math.floor(z10 / 400);
+    if (!lit.has(key)) lit.set(key, []);
+    lit.get(key).push([x10 / 10, z10 / 10]);
+  }
+  const litNear = (x, z, r) => {
+    for (let i = Math.floor((x - r) / 40); i <= Math.floor((x + r) / 40); i++) for (let j = Math.floor((z - r) / 40); j <= Math.floor((z + r) / 40); j++) {
+      for (const [lx, lz] of lit.get(i * 100000 + j) || []) if (Math.hypot(lx - x, lz - z) < r) return true;
+    }
+    return false;
+  };
+  for (const r of T.rd) {
+    const pts = roadPoints(r), mid = pts[Math.floor(pts.length / 2)];
+    if (litNear(mid[0], mid[1], r[1] / 20 + 30)) continue;
+    const spots = [];
+    lampSpots(r, spots);
+    for (let k = 0; k < spots.length; k += 3) lamps.push(spots[k], spots[k + 1], spots[k + 2], 0);
+  }
   const trees = [];
   for (const [x10, z10, h10, r10] of T.t) trees.push(x10 / 10, groundH(x10 / 10, z10 / 10), z10 / 10, h10 / 10, r10 / 10);
   let signs = null;
@@ -937,6 +1106,7 @@ export function buildDetail(T, atlas) {
   }
   return {
     city: G.arrays(), road: S.road.arrays(), walk: S.walk.arrays(), curb: S.curb.arrays(), trail: S.trail.arrays(),
+    concrete: S.concrete.arrays(), brick: S.brick.arrays(),
     paint: S.paint.arrays(), signs, lamps: Float32Array.from(lamps), trees: Float32Array.from(trees),
   };
 }

@@ -13,6 +13,7 @@ import { MplsMapSystem } from './mpls-map.js';
 import { CityAudioSystem } from './audio-system.js';
 import { createCity } from './mpls-city.js';
 import { createMplsTraffic } from './mpls-traffic.js';
+import { createTransit } from './mpls-transit.js';
 import { createPlaces } from './mpls-places.js';
 
 // Application setup, shader warm-up and frame loop: Slop New York's main.js, with Minneapolis (mpls-city.js) in place
@@ -129,6 +130,8 @@ async function initApp() {
   // The traffic on Minneapolis's streets (mpls-traffic.js): Slop New York's traffic.js on a road network from them
   const { trafficSystem, highwayTraffic, streetDetails } = await createMplsTraffic(scene, './data/roads.json');
   markInit('traffic');
+  // [Mpls] The Blue and Green Line trains, to Metro Transit's timetable (mpls-transit.js)
+  const transit = await createTransit(scene, { surfaceY: (x, z) => city.surfaceY(x, z) });
   const audioSystem = new CityAudioSystem({ controllerManager, trafficSystem, highwayTraffic, streetDetails }, {
     onStateChange: updateSoundButton
   });
@@ -680,7 +683,7 @@ async function initApp() {
 
   // Test hook (#debug): the city, the controllers and the camera, for scripted checks
   if (location.hash === '#debug') {
-    window.__mpls = { THREE, scene, renderer, city, controllerManager, cameraSystem, trafficSystem, audioSystem, mapSystem, lightingSystem, selectMode, selectTime, teleportTo };
+    window.__mpls = { THREE, scene, renderer, city, controllerManager, cameraSystem, trafficSystem, transit, audioSystem, mapSystem, lightingSystem, selectMode, selectTime, teleportTo };
   }
 
   // [Mpls] Walking, cycling and driving stop at the river's (or a lake's) edge, unless on a bridge: back to the last
@@ -735,6 +738,7 @@ async function initApp() {
     }
     city.update(dt, cameraSystem.camera, controllerManager.getActiveEntity().position);
     streetDetails.update(elapsed);
+    transit.update(elapsed, lightingSystem.activePresetId);
     places.update(controllerManager.getActiveEntity().position);
     lightingSystem.update(cameraSystem.currentPos);
     mapSystem.update();

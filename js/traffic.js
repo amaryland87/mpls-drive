@@ -1,4 +1,5 @@
 import * as THREE from 'three/webgpu';
+import { texture, uv, attribute, vec2, float } from 'three/tsl';
 import { buildRoadNetwork } from './road-network.js';
 import { createPedestrianSystem } from './pedestrian-system.js';
 import { vehicleContact, resolveVehicleContact, sweptVehicleContact } from './vehicle-physics.js';
@@ -31,6 +32,10 @@ const NUM_BUSES = 12;
 // [Mpls] What share of the pool drives round a point (1: all of it); mpls-traffic.js sets it by neighbourhood
 let densityAt = () => 1;
 function setTrafficDensity(fn) { densityAt = fn; }
+// [Mpls] Metro Transit's bus routes ([name, colour, trips a weekday], mpls-traffic.js): the edges a route runs along
+// carry its index (edge.bus), its buses keep to it, and their signs show it
+let busRoutes = [];
+function setBusRoutes(list) { busRoutes = list || []; }
 
 // Intelligent Driver Model: max acceleration, comfortable braking, time headway, standstill gap; and the sideways
 // acceleration drivers accept in bends, which sets how fast they take each turn or lane shift
@@ -43,6 +48,34 @@ const LOOKAHEAD = 70; // metres a driver looks ahead for vehicles, stop lines an
 const VEHICLE_RADIUS = 380;
 const NEAR_RADIUS = 350;
 const VEHICLE_SPAWN_DISTANCE = 250;
+
+// [Mpls] One row per bus route: its number in its colour, then METRO TRANSIT, as an atlas the sign picks its row from
+const SIGN_ROW_PX = 64;
+function createRouteSignTexture(routes) {
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = SIGN_ROW_PX * routes.length;
+  const ctx = c.getContext('2d');
+  routes.forEach(([name, col], r) => {
+    const y = r * SIGN_ROW_PX;
+    ctx.fillStyle = '#0c0f14';
+    ctx.fillRect(0, y, 256, SIGN_ROW_PX);
+    ctx.fillStyle = /^#?[0-9a-f]{6}$/i.test(col) && col.toLowerCase() !== '#ffffff' ? col : '#0058b8';
+    ctx.fillRect(6, y + 8, 62, 48);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = `900 ${name.length > 3 ? 20 : 26}px Inter, Arial, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(name.slice(0, 5), 37, y + 33, 58);
+    ctx.fillStyle = '#ff9d1c';
+    ctx.font = '800 22px JetBrains Mono, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('METRO TRANSIT', 78, y + 33, 172);
+  });
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
 
 function createBusDestinationTexture() {
   const c = document.createElement('canvas');
@@ -98,6 +131,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
   // 0. ROAD NETWORK
   // =========================================================================
   const network = buildRoadNetwork(sidewalks, obstacles, signalIntersections);
+  const onRoutes = busRoutes.length > 0 && network.edges.some((e) => e.bus && e.bus.length);   // [Mpls]
   const { nodes, edges, connector, curvePoint } = network;
 
   // Sides of an intersection (road-network.js step 9): a grid intersection's are 0 east, 1 west, 2 south, 3 north;
@@ -289,6 +323,13 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
   const busDestMat = new THREE.MeshBasicNodeMaterial({
     map: createBusDestinationTexture()
   });
+  // [Mpls] each bus's sign shows its route: its row of the route atlas (signRow, per instance)
+  const busSignRows = new THREE.InstancedBufferAttribute(new Float32Array(NUM_BUSES), 1);
+  busHeaderGeo.setAttribute('signRow', busSignRows);
+  if (busRoutes.length) {
+    const R = busRoutes.length, row = attribute('signRow', 'float');
+    busDestMat.colorNode = texture(createRouteSignTexture(busRoutes), vec2(uv().x, uv().y.add(float(R - 1).sub(row)).div(R))).rgb;
+  }
 
   const busWheelMat = createBusWheelMaterial();
   const busBodyInst = new THREE.InstancedMesh(busBodyGeo, busBodyMat, NUM_BUSES);
@@ -614,6 +655,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
       const m = e.moves[k];
       let w = m.turn === 'S' ? (v.bus ? 8 : 3) : 1;
       if (v.bus && m.turn !== 'S' && m.to.lanes.length < 2) w *= 0.05;
+      if (v.bus && v.route != null && onRoutes) w *= m.to.bus && m.to.bus.includes(v.route) ? 40 : 0.02; // [Mpls] keep to its route
       if (fromLane) {
         if (m.out[v.lane] < 0) w = 0;
       } else if (Math.abs(nearestLane(m, v.lane) - v.lane) * 22 > e.len - v.s) {
@@ -1300,7 +1342,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
   function spawnVehicle(v, rMin, rMax, protectView) {
     for (let attempt = 0; attempt < 12; attempt++) {
       const e = nearEdges[Math.floor(Math.random() * nearEdges.length)];
-      if (!e || (v.bus && e.axis !== 'ave') || e.len < 2 * v.half + 10) continue;
+      if (!e || (v.bus && (onRoutes ? !e.bus || !e.bus.length : e.axis !== 'ave')) || e.len < 2 * v.half + 10) continue;
       const lane = Math.floor(Math.random() * e.lanes.length);
       const along = (focusX - e.sx) * e.dx + (focusZ - e.sz) * e.dz;
       const minS = Math.max(v.half + 5, along - rMax);
@@ -1313,6 +1355,13 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
       if (d < rMin || d > rMax || (protectView && nearView(x, z, v.half + 4, VEHICLE_SPAWN_DISTANCE))) continue;
       if (player.active && Math.hypot(x - player.x, z - player.z) < 25) continue;
       if (!laneClear(e.occ[lane], s, v.half + 8)) continue;
+      if (v.bus && onRoutes) {
+        // [Mpls] one of the routes along this street, the busier ones more often
+        let total = 0;
+        for (const r of e.bus) total += busRoutes[r]?.[2] || 1;
+        let pick = Math.random() * total;
+        v.route = e.bus.find((r) => (pick -= busRoutes[r]?.[2] || 1) < 0) ?? e.bus[0];
+      }
       place(v, e, lane, s);
       return true;
     }
@@ -1483,6 +1532,7 @@ function createTrafficSystem(scene, sidewalks, obstacles, signalIntersections) {
     dummy.updateMatrix();
     busBodyInst.setMatrixAt(i, dummy.matrix);
     busHeaderInst.setMatrixAt(i, dummy.matrix);
+    if (busSignRows.array[i] !== (b.route ?? 0)) { busSignRows.array[i] = b.route ?? 0; busSignRows.needsUpdate = true; }
     writeLampState(b, busStates.array, i * 4);
 
     const dxCam = b.x - camX;
@@ -2146,4 +2196,4 @@ function createHighwayTraffic(scene, lanes) {
 }
 
 export {
-  setTrafficDensity, createTrafficSystem, createHighwayTraffic };
+  setTrafficDensity, setBusRoutes, createTrafficSystem, createHighwayTraffic };

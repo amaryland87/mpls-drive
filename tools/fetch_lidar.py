@@ -38,7 +38,7 @@ def merc(lat, lon):
 
 
 def get(path):
-    return subprocess.run(['curl', '-sS', '--fail', '--retry', '4', BASE + path], capture_output=True, check=True).stdout
+    return subprocess.run(['curl', '-sS', '--fail', '--retry', '6', '--retry-all-errors', BASE + path], capture_output=True, check=True).stdout
 
 
 # ------------------------------------------------------------ which nodes

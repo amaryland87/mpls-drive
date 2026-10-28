@@ -11,7 +11,7 @@ import {
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
   cityUniforms, evaluateApartmentInterior, createRoadSurfaceMaterial, createRoadPaintMaterial, createSidewalkMaterial,
-  createCurbMaterial, createWaterMaterial,
+  createCurbMaterial, createWaterMaterial, createPavedStreetMaterial,
 } from './tsl-materials.js';
 import { decodeGround, setGround, groundH, bridgeList, bridgeHeightAt, bridgeArrays, cityXZ, PIECE, ROAD_Y, WALK_Y, SOLID_CELL } from './mpls-geo.js';
 import { createTreeField } from './mpls-trees.js';
@@ -48,7 +48,7 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
   worker.postMessage({
     type: 'init', base: new URL(base, location.href).href,
     ground: { ...ground, h: ground.h.slice() },
-    palette: { walls: index.walls, houseWall: index.houseWall, houseRoof: index.houseRoof, boxWall: index.boxWall },
+    palette: { walls: index.walls, houseWall: index.houseWall, houseRoof: index.houseRoof, boxWall: index.boxWall, roofs: index.roofs },
     bridges: index.br,
   });
 
@@ -98,7 +98,7 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
     const t = facadeColorTex.sample(fUV).depth(layer);
     const nrm = facadeNormalTex.sample(fUV).depth(layer);
     const trim = smoothstep(0.2, 0.45, nrm.b), glass = smoothstep(0.7, 0.9, nrm.b);
-    const windowed = glass.mul(step(layer, 5.5));
+    const windowed = glass.mul(min(step(layer, 5.5).add(step(19.5, layer)), 1));     // [Mpls] and the houses' new walls
     const shop = step(3.5, layer).mul(step(layer, 4.5));
     const seed = dot(vertexColor().rgb, vec3(97.1, 53.7, 31.3)).add(layer.mul(7.3));
     const room = evaluateApartmentInterior(fUV.x.mul(2.6), fUV.y.mul(3.4), fract(fUV), floor(fUV), 2.6, 3.4, seed, 0.62,
@@ -122,6 +122,9 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
   const roadMat = lift(createRoadSurfaceMaterial(), 2);
   const walkMat = lift(createSidewalkMaterial(), 2);
   const curbMat = lift(createCurbMaterial(), 2);
+  // [Mpls] the concrete and brick streets
+  const concreteMat = lift(createPavedStreetMaterial('concrete'), 2);
+  const brickMat = lift(createPavedStreetMaterial('brick'), 2);
   const paintMat = lift(createRoadPaintMaterial(), 4);
   paintMat.side = THREE.DoubleSide;
   const bridgeMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 0.85, side: THREE.DoubleSide });
@@ -299,36 +302,79 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
   sharedGround.at = surfaceY;
 
   /* ----------------------------- Street lamps -----------------------------
-     Slop New York's cobra-head streetlights: a dark metal pole, an arm out over the street and a flattened housing
-     whose lens is a pale diffuser by day and glows warm after dusk. After dark the lamps nearest the camera each get
-     a real light from a shared pool: point lights, which the clustered lighting sorts so each pixel only works out
-     the few lamps that reach it.                                                                                  */
+     The city's street lights by fixture ([Mpls] bake_tiles.py lp; elsewhere Slop New York's cobra heads): a dark metal
+     pole and its head, whose lens is a pale diffuser by day and glows warm after dusk. 0 cobra head on an arm out over
+     the street, 1 the lantern on a short ornamental post, 2 the acorn, 3 the teardrop hung from a tall curved arm,
+     4 the shoebox, 5 a globe, 6 a knee-high accent light. After dark the lamps nearest the camera each get a real light
+     from a shared pool: point lights, which the clustered lighting sorts so each pixel only works out the few lamps
+     that reach it.                                                                                                  */
   const LAMP_H = 8.4, LAMP_ARM = 2.6;
-  const lampPoleGeo = mergeGeometries([
-    new THREE.CylinderGeometry(0.06, 0.06, LAMP_H, 10).translate(0, LAMP_H / 2, 0),
-    new THREE.CylinderGeometry(0.16, 0.2, 0.5, 10).translate(0, 0.25, 0),
-    new THREE.BoxGeometry(LAMP_ARM - 0.3, 0.09, 0.09).translate((LAMP_ARM - 0.3) / 2, LAMP_H - 0.2, 0),
-  ].map((g) => g.toNonIndexed()));
-  const lampHousingGeo = new THREE.SphereGeometry(1, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2).scale(0.7, 0.2, 0.3).translate(LAMP_ARM, LAMP_H - 0.32, 0);
-  const lampLensGeo = new THREE.CircleGeometry(1, 16).rotateX(Math.PI / 2).scale(0.6, 1, 0.24).translate(LAMP_ARM, LAMP_H - 0.325, 0);
+  const merged = (gs) => mergeGeometries(gs.map((g) => g.toNonIndexed()));
+  const cyl = (r0, r1, h, y, x = 0) => new THREE.CylinderGeometry(r0, r1, h, 10).translate(x, y + h / 2, 0);
+  const box = (sx, sy, sz, x, y) => new THREE.BoxGeometry(sx, sy, sz).translate(x, y, 0);
+  const LAMP_KINDS = [
+    { // 0 cobra head
+      pole: merged([cyl(0.06, 0.06, LAMP_H, 0), cyl(0.16, 0.2, 0.5, 0), box(LAMP_ARM - 0.3, 0.09, 0.09, (LAMP_ARM - 0.3) / 2, LAMP_H - 0.2),
+        new THREE.SphereGeometry(1, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2).scale(0.7, 0.2, 0.3).translate(LAMP_ARM, LAMP_H - 0.32, 0)]),
+      lens: new THREE.CircleGeometry(1, 16).rotateX(Math.PI / 2).scale(0.6, 1, 0.24).translate(LAMP_ARM, LAMP_H - 0.325, 0),
+      head: [LAMP_ARM, LAMP_H - 0.4], reach: 0.8,
+    },
+    { // 1 lantern: black fluted post, a four-sided glass lantern with a cap and finial
+      pole: merged([cyl(0.08, 0.11, 3.9, 0), cyl(0.2, 0.24, 0.7, 0), cyl(0.14, 0.1, 0.18, 3.9), cyl(0.05, 0.32, 0.25, 4.85), cyl(0.04, 0.04, 0.25, 5.1)]),
+      lens: new THREE.CylinderGeometry(0.27, 0.17, 0.75, 4).rotateY(Math.PI / 4).translate(0, 4.47, 0),
+      head: [0, 4.5], reach: 0,
+    },
+    { // 2 acorn
+      pole: merged([cyl(0.08, 0.11, 3.8, 0), cyl(0.2, 0.24, 0.7, 0), cyl(0.12, 0.08, 0.15, 3.8), cyl(0.04, 0.2, 0.2, 4.55)]),
+      lens: new THREE.SphereGeometry(0.24, 14, 10).scale(1, 1.6, 1).translate(0, 4.32, 0),
+      head: [0, 4.3], reach: 0,
+    },
+    { // 3 teardrop: tall pole, a curved arm, the pendant hanging from its end
+      pole: merged([cyl(0.1, 0.14, 8.6, 0), cyl(0.22, 0.26, 0.8, 0), box(1.0, 0.08, 0.08, 0.5, 8.75), box(0.7, 0.08, 0.08, 1.25, 8.6),
+        cyl(0.03, 0.03, 0.4, 7.95, 1.6), cyl(0.06, 0.24, 0.2, 7.75, 1.6)]),
+      lens: new THREE.SphereGeometry(0.26, 14, 10).scale(1, 1.5, 1).translate(1.6, 7.45, 0),
+      head: [1.6, 7.4], reach: 0.3,
+    },
+    { // 4 shoebox
+      pole: merged([cyl(0.08, 0.1, 9.0, 0), cyl(0.18, 0.22, 0.5, 0), box(1.2, 0.09, 0.09, 0.6, 8.9), box(0.75, 0.18, 0.45, 1.5, 8.9)]),
+      lens: new THREE.PlaneGeometry(0.66, 0.38).rotateX(Math.PI / 2).translate(1.5, 8.8, 0),
+      head: [1.5, 8.75], reach: 0.5,
+    },
+    { // 5 globe
+      pole: merged([cyl(0.07, 0.1, 3.5, 0), cyl(0.18, 0.22, 0.6, 0), cyl(0.1, 0.07, 0.15, 3.5)]),
+      lens: new THREE.SphereGeometry(0.3, 16, 12).translate(0, 3.92, 0),
+      head: [0, 3.9], reach: 0,
+    },
+    { // 6 accent: a bollard light
+      pole: merged([cyl(0.1, 0.1, 0.85, 0), cyl(0.12, 0.12, 0.08, 1.05)]),
+      lens: new THREE.CylinderGeometry(0.09, 0.09, 0.2, 10, 1, true).translate(0, 0.95, 0),
+      head: [0, 0.95], reach: 0,
+    },
+  ];
   const lampPoleMat = new THREE.MeshStandardNodeMaterial({ color: 0x3b4046, roughness: 0.45, metalness: 0.78 });
   const lampLensMat = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide });
   lampLensMat.colorNode = mix(vec3(new THREE.Color(0x8f918c)), vec3(new THREE.Color(0xfff1d6)).mul(2.1), smoothstep(0.4, 1.1, cityUniforms.uInteriorGlow));
   const lampSites = new Map();                        // piece -> [{ x, y, z, tx, tz, gy }] lamp heads and where they aim
+  // spots: [x, z, angle, fixture] flat
   function lampMeshes(P, spots) {
-    const n = spots.length / 3;
-    const meshes = [lampPoleGeo, lampHousingGeo, lampLensGeo].map((g, k) => new THREE.InstancedMesh(g, k === 2 ? lampLensMat : lampPoleMat, n));
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), up = new THREE.Vector3(0, 1, 0);
-    const sites = [];
-    for (let k = 0; k < n; k++) {
-      const x = spots[k * 3], z = spots[k * 3 + 1], a = spots[k * 3 + 2];
-      const y = groundH(x, z) + WALK_Y;
-      m.compose(v.set(x, y, z), q.setFromAxisAngle(up, a), one);
-      for (const mesh of meshes) mesh.setMatrixAt(k, m);
-      const hx = x + Math.cos(a) * LAMP_ARM, hz = z - Math.sin(a) * LAMP_ARM;
-      sites.push({ x: hx, y: y + LAMP_H - 0.4, z: hz, tx: x + Math.cos(a) * (LAMP_ARM + 0.8), tz: z - Math.sin(a) * (LAMP_ARM + 0.8), gy: y });
-    }
-    for (const mesh of meshes) { mesh.computeBoundingSphere(); mesh.castShadow = !lowPower && mesh.material === lampPoleMat; mesh.receiveShadow = true; }
+    const sites = [], meshes = [];
+    LAMP_KINDS.forEach((K, kind) => {
+      const mine = [];
+      for (let k = 0; k < spots.length; k += 4) if (spots[k + 3] === kind) mine.push(k);
+      if (!mine.length) return;
+      const pole = new THREE.InstancedMesh(K.pole, lampPoleMat, mine.length), lens = new THREE.InstancedMesh(K.lens, lampLensMat, mine.length);
+      mine.forEach((k, n) => {
+        const x = spots[k], z = spots[k + 1], a = spots[k + 2];
+        const y = groundH(x, z) + WALK_Y;
+        m.compose(v.set(x, y, z), q.setFromAxisAngle(up, a), one);
+        pole.setMatrixAt(n, m);
+        lens.setMatrixAt(n, m);
+        const [hx, hy] = K.head, ca = Math.cos(a), sa = Math.sin(a);
+        if (kind !== 6) sites.push({ x: x + ca * hx, y: y + hy, z: z - sa * hx, tx: x + ca * (hx + K.reach), tz: z - sa * (hx + K.reach), gy: y });
+      });
+      for (const mesh of [pole, lens]) { mesh.computeBoundingSphere(); mesh.castShadow = !lowPower && mesh === pole; mesh.receiveShadow = true; meshes.push(mesh); }
+    });
     lampSites.set(P, sites);
     return meshes;
   }
@@ -516,7 +562,8 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
     const D = msg.detail;
     const out = [];
     if (D) {
-      for (const [A, mat, cast] of [[D.city, cityMat, true], [D.road, roadMat, false], [D.walk, walkMat, false], [D.curb, curbMat, false],
+      for (const [A, mat, cast] of [[D.city, cityMat, true], [D.road, roadMat, false], [D.concrete, concreteMat, false], [D.brick, brickMat, false],
+        [D.walk, walkMat, false], [D.curb, curbMat, false],
         [D.trail, trailMat, false], [D.paint, paintMat, false]]) {
         const m = meshOf(A, mat, cast);
         if (m) out.push(m);

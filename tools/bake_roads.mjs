@@ -7,8 +7,12 @@
 //
 // Writes public/mpls-drive/data/roads.json:
 //   nodes  [x, z, ...] junctions and street ends, metres (x east, z south)
-//   links  [[a, b, name, width, lanes, dir, [x, z, ...inner points]], ...] dir 1 one-way a -> b, 0 two-way
+//   links  [[a, b, name, width, lanes, dir, [x, z, ...inner points], [bus route, ...]], ...] dir 1 one-way a -> b,
+//          0 two-way; the bus routes (indexing buses) that run along it
 //   names  ['', ...] (the street pieces carry no names; the kind of road stands in)
+//   signals [node, ...] the signalled corners (the tiles' sg: junctions with an OpenStreetMap traffic signal)
+//   buses  [[route name, colour, trips a weekday], ...] Metro Transit's bus routes on the map (data/transit.json,
+//          made by bake_transit.py, which this reads if it's there)
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,9 +61,11 @@ function nearNode(x, z, r) {
 
 const names = ['', ...KINDS];
 const links = [];
+const signalAt = [];
 let pieces = 0;
 for (const f of fs.readdirSync(path.join(CITY, 't')).filter((f) => f.endsWith('.json')).sort()) {
   const data = JSON.parse(fs.readFileSync(path.join(CITY, 't', f), 'utf8'));
+  for (let i = 0; i < (data.sg || []).length; i += 2) signalAt.push([data.sg[i], data.sg[i + 1]]);
   for (const r of data.rd || []) {
     const [cls, w10, lanes, oneway, , , n] = r;
     if (!DRIVE.has(KINDS[cls]) || n < 2) continue;
@@ -111,13 +117,65 @@ for (let k = 0; k < segs.length; k++) {
   bridgeLinks++;
 }
 
+// The signalled corners: the junctions the tiles mark (street piece ends, to the decimetre)
+const signals = [...new Set(signalAt.map(([x10, z10]) => nodeAt.get(`${x10},${z10}`)).filter((n) => n !== undefined))];
+
+// The bus routes: a link is on a route when the route's line runs along it (within BUS_R metres, the same way, at
+// its quarter, middle and three-quarter points)
+const BUS_R = 9;
+const transitPath = path.join(HERE, '../../public/mpls-drive/data/transit.json');
+const buses = fs.existsSync(transitPath) ? JSON.parse(fs.readFileSync(transitPath, 'utf8')).bus : [];
+const busCells = new Map();
+buses.forEach((r, ri) => {
+  for (let k = 0; k + 3 < r.shape.length; k += 2) {
+    const s = [r.shape[k] / 10, r.shape[k + 1] / 10, r.shape[k + 2] / 10, r.shape[k + 3] / 10, ri];
+    for (let i = Math.floor((Math.min(s[0], s[2]) - BUS_R) / 32); i <= Math.floor((Math.max(s[0], s[2]) + BUS_R) / 32); i++) {
+      for (let j = Math.floor((Math.min(s[1], s[3]) - BUS_R) / 32); j <= Math.floor((Math.max(s[1], s[3]) + BUS_R) / 32); j++) {
+        const key = i * 100000 + j;
+        if (!busCells.has(key)) busCells.set(key, []);
+        busCells.get(key).push(s);
+      }
+    }
+  }
+});
+function routesNear(x, z, ux, uz) {
+  const out = new Set();
+  for (const [ax, az, bx, bz, ri] of busCells.get(Math.floor(x / 32) * 100000 + Math.floor(z / 32)) || []) {
+    const ex = bx - ax, ez = bz - az, L = Math.hypot(ex, ez) || 1e-9;
+    if (Math.abs(ex / L * ux + ez / L * uz) < 0.8) continue;
+    const t = Math.max(0, Math.min(1, ((x - ax) * ex + (z - az) * ez) / (L * L)));
+    if (Math.hypot(x - ax - ex * t, z - az - ez * t) < BUS_R) out.add(ri);
+  }
+  return out;
+}
+let busLinks = 0;
+for (const l of links) {
+  const pts = [nodes[l[0]], ...Array.from({ length: l[6].length / 2 }, (_, k) => [l[6][k * 2], l[6][k * 2 + 1]]), nodes[l[1]]];
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  let on = null;
+  for (const f of [0.25, 0.5, 0.75]) {
+    const s = cum.at(-1) * f;
+    let i = 1;
+    while (i < pts.length - 1 && cum[i] < s) i++;
+    const L = cum[i] - cum[i - 1] || 1, t = (s - cum[i - 1]) / L;
+    const ux = (pts[i][0] - pts[i - 1][0]) / L, uz = (pts[i][1] - pts[i - 1][1]) / L;
+    const here = routesNear(pts[i - 1][0] + ux * L * t, pts[i - 1][1] + uz * L * t, ux, uz);
+    on = on ? new Set([...on].filter((r) => here.has(r))) : here;
+  }
+  l.push([...on].sort((a, b) => a - b));
+  if (on.size) busLinks++;
+}
+
 const round = (v) => Math.round(v * 10) / 10;
 const out = {
-  note: 'OpenStreetMap contributors (ODbL). Made by tools/mpls-drive/bake_roads.mjs from public/mpls-drive/city.',
+  note: 'OpenStreetMap contributors (ODbL); Metro Transit GTFS. Made by tools/mpls-drive/bake_roads.mjs from public/mpls-drive/city.',
   nodes: nodes.flatMap(([x, z]) => [round(x), round(z)]),
-  links: links.map(([a, b, ni, w, lanes, dir, inner]) => [a, b, ni, round(w), lanes, dir, inner.map(round)]),
-  names
+  links: links.map(([a, b, ni, w, lanes, dir, inner, bus]) => [a, b, ni, round(w), lanes, dir, inner.map(round), bus]),
+  names, signals,
+  buses: buses.map((r) => [r.name, r.color, r.n]),
 };
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, JSON.stringify(out));
+console.log(`signals ${signals.length}, bus routes ${buses.length} on ${busLinks} links`);
 console.log(`street pieces ${pieces}, bridge links ${bridgeLinks}, nodes ${nodes.length}, links ${links.length}, ${(fs.statSync(OUT).size / 1e6).toFixed(2)} MB`);

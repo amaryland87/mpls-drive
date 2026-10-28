@@ -4,10 +4,11 @@
     .venv/bin/python fetch_osm.py
 
 Downloads Geofabrik's daily Minnesota extract into osm-cache/ (about 290 MB,
-skipped if already there), then pulls out everything inside the map (see
+skipped if already there; where Geofabrik can't be reached, OpenStreetMap France's US Midwest extract, 2.8 GB), then pulls out everything inside the map (see
 area.py) into small JSON files shaped like Overpass API `out geom;` results:
-roads_all, paths (footways, cycleways, trails and alleys), water, green, rail, bld_all, barriers (fences, walls,
-hedges), paved (surface parking lots), plus names.json with the centres of a
+roads_all, paths (footways, cycleways, trails and alleys), water, green, rail (railways and the light rail), bld_all,
+barriers (fences, walls, hedges), paved (surface parking lots), points (signals, benches, shelters and the rest of
+the street furniture: POINTS below), plus names.json with the centres of a
 few named places used as landmarks, and search.json with every street address
 and named place, for the address search. Delete osm-cache/ to start fresh.
 
@@ -24,6 +25,7 @@ from area import LAT0, LON0, MX, MY, X0, X1, Z0, Z1
 CACHE = os.path.join(HERE, 'osm-cache')
 PBF = os.path.join(CACHE, 'minnesota-latest.osm.pbf')
 URL = 'https://download.geofabrik.de/north-america/us/minnesota-latest.osm.pbf'
+MIRROR = 'https://download.openstreetmap.fr/extracts/north-america/us-midwest-latest.osm.pbf'
 MARGIN = 300   # metres of data beyond the map so roads and parks run off the edge cleanly
 S, N = LAT0 - (Z1 + MARGIN) / MY, LAT0 - (Z0 - MARGIN) / MY
 W, E = LON0 + (X0 - MARGIN) / MX, LON0 + (X1 + MARGIN) / MX
@@ -40,6 +42,14 @@ NAMES = {'Bde Maka Ska', 'Lake Harriet', 'Lake Harriet Bandshell', 'Lakewood Cem
 PLACE_KEYS = ('amenity', 'shop', 'tourism', 'leisure', 'historic', 'building', 'office', 'sport', 'craft',
               'healthcare', 'public_transport', 'natural', 'landuse', 'waterway')
 NEIGHBOURHOODS = {'neighbourhood', 'suburb', 'quarter'}
+RAIL = {'rail', 'light_rail', 'tram'}
+# Points on the street: (key, value) -> kind. bake_tiles.py places them (signals mark the signalled corners).
+POINTS = {('highway', 'traffic_signals'): 'signal', ('amenity', 'bench'): 'bench', ('amenity', 'waste_basket'): 'bin',
+          ('highway', 'bus_stop'): 'stop', ('amenity', 'shelter'): 'shelter', ('emergency', 'fire_hydrant'): 'hydrant',
+          ('amenity', 'bicycle_rental'): 'bikeshare', ('amenity', 'post_box'): 'mailbox', ('power', 'pole'): 'pole',
+          ('amenity', 'bicycle_parking'): 'bikerack', ('railway', 'stop'): 'railstop', ('railway', 'station'): 'railstop',
+          ('public_transport', 'platform'): 'platform'}
+KEEP = ('shelter', 'shelter_type', 'bench', 'name', 'railway', 'light_rail', 'bus', 'direction', 'traffic_signals:direction')
 
 
 def pts(nodes):
@@ -57,15 +67,25 @@ def touches(geom):
 class Cut(osmium.SimpleHandler):
     def __init__(self):
         super().__init__()
-        self.out = {k: [] for k in ('roads_all', 'paths', 'water', 'green', 'rail', 'bld_all', 'barriers', 'paved')}
+        self.out = {k: [] for k in ('roads_all', 'paths', 'water', 'green', 'rail', 'bld_all', 'barriers', 'paved', 'points')}
         self.names = {}
         self.places = []
+
+    def node(self, n):
+        if not n.tags or not n.location.valid():
+            return
+        t = n.tags
+        for (k, v), kind in POINTS.items():
+            if t.get(k) == v and S <= n.lat <= N and W <= n.lon <= E:
+                self.out['points'].append({'type': 'node', 'id': n.id, 'kind': kind, 'lat': round(n.lat, 7), 'lon': round(n.lon, 7),
+                                           'tags': {q: t[q] for q in KEEP if q in t}})
+                return
 
     def way(self, w):
         t = w.tags
         hw, rail, ww = t.get('highway'), t.get('railway'), t.get('waterway')
         alley = hw == 'service' and t.get('service') == 'alley'
-        bucket = ('roads_all' if hw in HW else 'paths' if hw in PATHS or alley else 'rail' if rail == 'rail' else 'water' if ww == 'river'
+        bucket = ('roads_all' if hw in HW else 'paths' if hw in PATHS or alley else 'rail' if rail in RAIL else 'water' if ww == 'river'
                   else 'barriers' if t.get('barrier') in ('fence', 'wall', 'hedge', 'retaining_wall') else None)
         if not bucket:
             return
@@ -115,9 +135,15 @@ class Cut(osmium.SimpleHandler):
 
 os.makedirs(CACHE, exist_ok=True)
 if not os.path.exists(PBF):
-    print('downloading', URL, flush=True)
-    subprocess.run(['curl', '-sSL', '--fail', '-o', PBF + '.part', URL], check=True)
-    os.rename(PBF + '.part', PBF)
+    for url in (URL, MIRROR):
+        print('downloading', url, flush=True)
+        if subprocess.run(['curl', '-sSL', '--fail', '--retry', '4', '-C', '-', '-o', PBF + '.part', url]).returncode == 0:
+            os.rename(PBF + '.part', PBF)
+            break
+        if os.path.exists(PBF + '.part'):
+            os.remove(PBF + '.part')
+    else:
+        sys.exit('could not download the map data')
 h = Cut()
 h.apply_file(PBF, locations=True, idx='flex_mem')
 for k, v in h.out.items():
