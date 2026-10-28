@@ -2,7 +2,7 @@
 // for a tile, this fetches its data and map image, builds its big buildings, collision and surface map, and sends
 // them back as transferable typed arrays; then, piece by piece as the camera comes near, the houses, streets, lamps
 // and trees. The page (mpls-city.js) only wraps the arrays in geometries.
-import { setGround, setPalette, buildTile, buildDetail, groundGrid, waterArrays, cityXZ, ROAD_KINDS, fitTrees, bridgeList } from './mpls-geo.js';
+import { setGround, setPalette, buildTile, buildDetail, groundGrid, waterArrays, cityXZ, ROAD_KINDS, fitTrees, fitLamps, bridgeList } from './mpls-geo.js';
 import { buildSidewalks } from './mpls-blocks.js';
 
 const tiles = new Map();       // key -> { raw: piece -> detail records, atlas }
@@ -144,6 +144,7 @@ self.onmessage = async ({ data: msg }) => {
     if (msg.type === 'detail') {
       const t = tiles.get(msg.key), T = t?.raw.get(msg.piece);
       const out = { type: 'detail', key: msg.key, piece: msg.piece, detail: T ? buildDetail(T, t.atlas) : null };
+      if (out.detail) fitLamps(out.detail, T, await sidewalks);   // [Mpls] none standing in a street
       self.postMessage(out, buffersOf(out));
       return;
     }

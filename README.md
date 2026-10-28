@@ -52,8 +52,9 @@ Dressed from the city's own records (`tools/fetch_city.py`, `bake_transit.py`):
   often as houses of its year have them. Every roof, houses' and garages' shingles and the big buildings' flat roofs
   alike, takes its colour from Hennepin County's 2022 aerial photo.
 - Street lights stand where the city's 18,000-odd lights are, each as its fixture: cobra heads, the residential lanterns,
-  acorns, downtown's teardrops, shoeboxes, the Loring Greenway's globes. Streets with none of the city's lights near
-  (Xcel Energy owns those, and they aren't in its data) keep evenly spaced cobra heads.
+  acorns, downtown's teardrops, shoeboxes, the Loring Greenway's globes, thinned to one in 22 m. Streets with none of the
+  city's lights near (Xcel Energy owns those, and they aren't in its data) keep cobra heads every 70 m (100 m off the main
+  streets). None stands in a street: `fitLamps` (`js/mpls-geo.js`) moves one that would past the curb.
 - Traffic signals are at the corners OpenStreetMap has them (`data/roads.json` signals).
 - Street furniture (`mpls-geo.js` furnitureGeo): the city's hydrants and Nice Ride docks, a sign at every Metro Transit
   bus stop and a shelter where OpenStreetMap has one, the light rail's platform canopies, and OpenStreetMap's benches,
@@ -65,5 +66,11 @@ Dressed from the city's own records (`tools/fetch_city.py`, `bake_transit.py`):
   their overhead wire, at the hour the sky shows; the buses keep to Metro Transit's routes and show them on their signs.
 
 Not yet: pedestrians crossing at the crosswalks (NYC's crossings follow Manhattan's grid). The trains don't stop the car.
+
+Bridge decks are put back together from index.json's pieces (`bridgeList`, `js/mpls-geo.js`): each deck's line and
+heights smoothed, a ramp that ends on another deck brought to its height there, and drawn as one unbroken ribbon.
+
+The count of people who've played (top left, `js/play-count.js`) is kept by [Abacus](https://abacus.jasoncameron.dev),
+once per browser.
 
 Add `#debug` to the URL for a test hook (`window.__mpls`).
