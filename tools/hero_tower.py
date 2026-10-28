@@ -22,8 +22,12 @@ Center's), notched corners (the IDS Tower's "zogs"). This models it from the sid
            straight up
   shaft    (if the tower has one) the walls from SHAFT[0] to SHAFT[1] fitted as one evenly tapering shaft of four
            sides, between the rectangles round its outline there, and a pyramid up to where its cap ends
+  round    (if it has a dome) the dome from ROUND[0] to ROUND[1] as a surface of revolution, its radius at each metre
+           from the slice's area, and a lantern of radius ROUND[2] up to where the survey's returns end
+  flat     every part ends in a flat roof (no pyramids: what stands on the roof is a sign's frame, not a spire)
   dress    each band's facade from the building's facade list by height, each roof the aerial photo's colour over it
-           (fetch_city.py; up to PHOTO_MAX), and the extras (the Foshay's name in lights)
+           (fetch_city.py; up to PHOTO_MAX), and the extras: the Foshay's name in lights, City Hall's clocks,
+           Capella Tower's open ring, the Gold Medal Flour sign
 
 Writes heroes/NAME.json (see hero_house.py), seated on the game's ground (city/ground.bin) at the outline's middle.
 """
@@ -62,11 +66,25 @@ TOWERS = {
     # glass roof, the Marquette Hotel and the low wings round the block
     'ids': dict(ways=[1385236413], facade=[(14, 'glass', '#a9c4dc'), (999, 'glass', '#8fb3d6')], roof='#9aa5ae',
                 prism=(40, 228)),
+    # Capella Tower (1992, Pei Cobb Freed): granite and glass, stepping back to the drum its open steel ring stands on
+    'capella': dict(ways=[115559604], facade=[(25, 'brickLitePlain', '#cfd2d4'), (999, 'concRibbon', '#cfd5dc')],
+                    roof='#b9bec2', ring=True),
+    # Minneapolis City Hall (1906): rough red-brown Ortonville granite round a courtyard, the clock tower over 8th
+    # Street and Fourth Avenue with its four clock faces and pyramid roof
+    'city-hall': dict(ways=[4503577], facade=[(999, 'brickRed', '#c7a092')], roof='#7d6a63', clocks=True),
+    # The Basilica of St. Mary (1914): white granite, its copper dome and the two towers over its front
+    'basilica': dict(ways=[39422725], facade=[(999, 'brickLitePlain', '#e4dfd3')], roof='#9fb1a4', photo_max=75, round=(36, 54, 2.0)),
+    # Rand Tower (1929): Art Deco in tan brick, stepping back to its top
+    'rand': dict(ways=[29080581], facade=[(10, 'brickLitePlain', '#c9b08d'), (999, 'brickLite', '#cdb48f')], roof='#a59a8c'),
+    # The Gold Medal Flour elevator (1908): its concrete bins under the sign that names it
+    'gold-medal': dict(ways=[157035921], facade=[(999, 'concPlain', '#cbc4b6')], roof='#9e9a92', sign=('GOLD MEDAL FLOUR', 0.8), flat=True),
 }
 
 NAME = sys.argv[1]
 T = TOWERS[NAME]
 SIMPLIFY = T.get('simplify', SIMPLIFY)
+PHOTO_MAX = T.get('photo_max', 60)      # metres: roofs up to this high take their colour from the aerial photo; a taller
+                                        # one leans out of place in it (the photo isn't a true orthophoto)
 CACHE = os.path.join(HERE, 'osm-cache', 'heroes', NAME)
 LAZ = os.path.join(HERE, 'osm-cache', 'heroes', 'scout')
 os.makedirs(CACHE, exist_ok=True)
@@ -81,8 +99,8 @@ def curl(url, path=None):
 # ------------------------------------------------------------ the outline
 outline = []
 for e in load_osm('bld_all'):
-    if e['type'] == 'way' and e['id'] in T['ways']:
-        outline.append(rings(e)[0][1])
+    if e['id'] in T['ways'] and (e['type'] == 'way' or e['type'] == 'relation'):
+        outline += [r for role, r in rings(e) if role == 'outer']
 assert outline, 'outline not found in osm-cache/bld_all.json'
 allpts = [p for r in outline for p in r]
 rect = min_rect(max(outline, key=len))
@@ -329,7 +347,7 @@ for li, h in enumerate(LEVELS):
             sel = band[0] & (H > y1)
             apex = None
             # (up to where most of what stands over it ends: a mast on top isn't the roof)
-            if area(ring1) < 120 and sel.sum() > 8 and np.percentile(H[sel], 80) > y1 + 2:
+            if area(ring1) < 120 and sel.sum() > 8 and np.percentile(H[sel], 80) > y1 + 2 and not T.get('flat'):
                 apex = float(np.percentile(H[sel], 80))
             close(band, apex)
     open_bands = nxt
@@ -372,10 +390,11 @@ if T.get('shaft'):
     hi = [(p[0] - hu + mu, p[1] - hv + mv) for p in hi]
     reach = [(mu + (p[0] - mu) * 1.15, mv + (p[1] - mv) * 1.15) for p in lo]
     kept = []
-    for r0, b0, r1, b1 in bands:
+    for band in bands:
+        r0, b0, r1, b1 = band[:4]
         cu, cv = sum(p[0] for p in r0) / len(r0), sum(p[1] for p in r0) / len(r0)
         if not inside_ring(cu, cv, reach) or b1 <= y0:
-            kept.append((r0, b0, r1, b1))
+            kept.append(band)
         elif b0 < y0 and r1 is not None:
             t = (y0 - b0) / (b1 - b0)
             kept.append((r0, b0, [(p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t) for p, q in zip(r0, r1)], y0))
@@ -404,14 +423,51 @@ if T.get('prism'):
     ring = simplify(trace(mask), PRISM_SIMPLIFY)
     A = area(ring)
     kept = []
-    for r0, b0, r1, b1 in bands:
+    for band in bands:
+        r0, b0, r1, b1 = band[:4]
         cu, cv = sum(p[0] for p in r0) / len(r0), sum(p[1] for p in r0) / len(r0)
         mine = inside_ring(cu, cv, ring) and abs(area(r0) - A) < 0.25 * A
         if mine and y0 - 0.5 <= b0 < y1 - 0.5:
             continue
-        kept.append((r0, b0, r1, b1))
+        kept.append(band)
     bands = kept + [(ring, y0, ring, y1)]
     print('prism', len(ring), 'corners', round(A), 'm² from', y0, 'to', y1)
+if T.get('round'):
+    # A dome from y0 to y1: round, its radius at each metre from the area of the survey's slice there (only ever
+    # narrowing, smoothed), on the middle of those slices, in the roof's colour; then the lantern on top, up to where
+    # the survey's returns end. The survey's bands of the dome are left out
+    y0, y1, lantern = T['round']
+    lv = [y for y in LEVELS if y0 <= y <= y1 and slices[int(round(y - LEVELS[0]))]]
+    parts = [max(slices[int(round(y - LEVELS[0]))], key=lambda cr: cr[0].sum()) for y in lv]
+    rad = [math.sqrt(c.sum() * CELL * CELL / math.pi) for c, _ in parts]
+    for k in range(1, len(rad)):
+        rad[k] = min(rad[k], rad[k - 1])
+    rad = [sum(rad[max(0, k - 1):k + 2]) / len(rad[max(0, k - 1):k + 2]) for k in range(len(rad))]
+    mu = float(np.mean([sum(p[0] for p in r) / len(r) for _, r in parts[:3]]))
+    mv = float(np.mean([sum(p[1] for p in r) / len(r) for _, r in parts[:3]]))
+    circle = lambda r: [(mu + r * math.cos(a * math.pi / 12), mv + r * math.sin(a * math.pi / 12)) for a in range(24)]
+    kept = []
+    for band in bands:
+        r0, b0 = band[0], band[1]
+        cu, cv = sum(p[0] for p in r0) / len(r0), sum(p[1] for p in r0) / len(r0)
+        if b0 >= y0 - 0.5 and math.hypot(cu - mu, cv - mv) < rad[0] * 1.3:
+            continue
+        kept.append(band)
+    dome = ('metal', T['roof'])
+    bands = kept + [(circle(rad[k]), lv[k], circle(rad[k + 1]), lv[k + 1], dome) for k in range(len(lv) - 1)]
+    top_y = lv[-1]
+    sel = (H > top_y) & (np.hypot(U0 + (np.arange(NU)[None, :] + 0.5) * CELL - mu, V0 + (np.arange(NV)[:, None] + 0.5) * CELL - mv) < rad[-1] + 1)
+    apex = float(np.percentile(H[sel], 95)) if sel.sum() > 4 else top_y + 6
+    bands += [(circle(lantern), top_y, circle(lantern), top_y + (apex - top_y) * 0.55, ('brickLitePlain', T['facade'][-1][2])),
+              (circle(lantern * 1.2), top_y + (apex - top_y) * 0.55, None, apex, dome)]
+    print('dome', [round(r, 1) for r in rad[::3]], 'from', lv[0], 'to', top_y, 'lantern to', round(apex, 1))
+if T.get('ring'):
+    # the drum: the highest part as big as most of the tower's head; over it, only the crown
+    drum = max((b for b in bands if b[2] is not None and area(b[2]) > 1000), key=lambda b: b[3])
+    crown_top = float(np.percentile(H[H > drum[3]], 98)) if (H > drum[3]).sum() > 8 else drum[3] + 8
+    bands = [b for b in bands if b[1] < drum[3] - 0.5]
+    CROWN = (drum[2], drum[3], crown_top - drum[3])
+    print('crown on the drum at', round(drum[3], 1), 'to', round(crown_top, 1))
 print('bands', len(bands), flush=True)
 
 
@@ -470,8 +526,6 @@ def W(u, y, v):
 
 
 ROOF = L['concPlain']
-PHOTO_MAX = 60      # metres: roofs up to this high take their colour from the aerial photo; a taller one leans out of
-                    # place in it (the photo isn't a true orthophoto), so it keeps the tower's roof colour
 AER = {}
 
 
@@ -501,8 +555,11 @@ def roof_colour(ring, y):
     return '#%02x%02x%02x' % tuple(int(v) for v in c)
 
 
-for ring0, y0, ring1, y1 in bands:
+for band in bands:
+    ring0, y0, ring1, y1 = band[:4]
     lay, col = facade((y0 + y1) / 2)
+    if len(band) > 4:
+        lay, col = L[band[4][0]], band[4][1]
     y0 = max(0.0, y0) if y0 <= LEVELS[0] else y0
     base = -1.5 if y0 <= LEVELS[0] else y0     # the lowest walls run on down into the ground, for the slope
     if ring1 is None:
@@ -522,44 +579,136 @@ for ring0, y0, ring1, y1 in bands:
         mesh.poly([W(ring1[a][0], y1, ring1[a][1]), W(ring1[b][0], y1, ring1[b][1]), W(ring1[c][0], y1, ring1[c][1])], ROOF, rc)
 print('triangles', len(mesh.tris), flush=True)
 
-# The Foshay's name in lights on each face, just under its cap: blocky capitals, a lit tube each stroke
+# Signs and clocks. Letters are blocky capitals five strokes high, each stroke a panel standing a little proud
 FONT = {
     'F': ['111', '100', '110', '100', '100'], 'O': ['111', '101', '101', '101', '111'], 'S': ['111', '100', '111', '001', '111'],
     'H': ['101', '101', '111', '101', '101'], 'A': ['111', '101', '111', '101', '101'], 'Y': ['101', '101', '111', '010', '010'],
+    'G': ['111', '100', '101', '101', '111'], 'L': ['100', '100', '100', '100', '111'], 'D': ['110', '101', '101', '101', '110'],
+    'M': ['101', '111', '111', '101', '101'], 'E': ['111', '100', '110', '100', '111'], 'U': ['101', '101', '101', '101', '111'],
+    'R': ['110', '101', '110', '101', '101'], ' ': ['000', '000', '000', '000', '000'],
 }
-if T.get('letters'):
-    word, px = T['letters']
-    # the shaft's last outline before the cap, and its height
-    cap = [b for b in bands if b[2] is None]
-    shaft = max((b for b in bands if b[2] is not None), key=lambda b: b[3])
-    ring, ytop = (cap[0][0], cap[0][1]) if cap else (shaft[2], shaft[3])
-    y_mid = ytop - 6.0
-    n = len(ring)
-    for k in range(n):
-        a, b = ring[k - 1], ring[k]
-        L_ = math.hypot(b[0] - a[0], b[1] - a[1])
-        if L_ < len(word) * 4 * px:
-            continue
-        ux, uv = (b[0] - a[0]) / L_, (b[1] - a[1]) / L_
-        nx, nv = uv, -ux                                   # outward, for an anticlockwise ring
-        if sum(p[0] * nx + p[1] * nv for p in ring) / n > a[0] * nx + a[1] * nv:
-            nx, nv = -nx, -nv
-        width = len(word) * 4 * px - px
-        s0 = (L_ - width) / 2
-        for ci_, ch in enumerate(word):
-            for row, bits in enumerate(FONT[ch]):
-                for col_, bit in enumerate(bits):
-                    if bit != '1':
-                        continue
-                    s = s0 + (ci_ * 4 + col_) * px
+
+
+def outward(ring, a, b):
+    """The unit vector out of ring across its edge a-b (local u, v)."""
+    L_ = math.hypot(b[0] - a[0], b[1] - a[1]) or 1
+    nx, nv = (b[1] - a[1]) / L_, -(b[0] - a[0]) / L_
+    if sum((p[0] - a[0]) * nx + (p[1] - a[1]) * nv for p in ring) > 0:
+        nx, nv = -nx, -nv
+    return nx, nv
+
+
+def letters(word, px, a, b, y_mid, n, off, colour, layer='paint'):
+    """word along the line a-b (local u, v), centred on it, y_mid its middle, off metres out along n; None if it won't fit."""
+    L_ = math.hypot(b[0] - a[0], b[1] - a[1])
+    width = len(word) * 4 * px - px
+    if L_ < width:
+        return None
+    # it reads left to right for someone out along n looking at it: running to their right, (n.v, -n.u) seen from above
+    # (u east-ish, v south-ish: the game's x and z turned)
+    if (b[0] - a[0]) * n[1] - (b[1] - a[1]) * n[0] < 0:
+        a, b = b, a
+    ux, uv = (b[0] - a[0]) / L_, (b[1] - a[1]) / L_
+    s0 = (L_ - width) / 2
+    q = lambda ss, yy: W(a[0] + ux * ss + n[0] * off, yy, a[1] + uv * ss + n[1] * off)
+    for ci_, ch in enumerate(word):
+        for row, bits in enumerate(FONT[ch]):
+            for col_, bit in enumerate(bits):
+                if bit == '1':
+                    s_ = s0 + (ci_ * 4 + col_) * px
                     y = y_mid + (2 - row) * px
-                    o = 0.35
-                    q = lambda ss, yy: W(a[0] + ux * ss + nx * o, yy, a[1] + uv * ss + nv * o)
-                    mesh.poly([q(s, y - px / 2), q(s + px, y - px / 2), q(s + px, y + px / 2), q(s, y + px / 2)], L['paint'], '#fff6dc')
+                    mesh.poly([q(s_, y - px / 2), q(s_ + px, y - px / 2), q(s_ + px, y + px / 2), q(s_, y + px / 2)], L[layer], colour)
+    return width
+
+
+def tallest(kind):
+    """The band that reaches highest among pyramids (kind None) or walls (kind 'wall')."""
+    pick = [b for b in bands if (b[2] is None) == (kind is None)]
+    return max(pick, key=lambda b: b[3]) if pick else None
+
+
+if T.get('letters'):
+    # The Foshay's name in lights on each face of the shaft, just under its cap
+    word, px = T['letters']
+    cap = tallest(None)
+    ring, ytop = (cap[0], cap[1]) if cap else (tallest('wall')[2], tallest('wall')[3])
+    for k in range(len(ring)):
+        letters(word, px, ring[k - 1], ring[k], ytop - 6.0, outward(ring, ring[k - 1], ring[k]), 0.35, '#fff6dc')
+
+if T.get('clocks'):
+    # City Hall's four clock faces, on each side of the clock tower under its roof: a white dial with its ring and hands
+    cap = tallest(None)
+    ring, ytop = cap[0], cap[1]
+    a_ = min_rect(ring)[2]
+    box = rect_of(ring, a_)
+    for k in range(4):
+        a, b = box[k - 1], box[k]
+        n = outward(box, a, b)
+        L_ = math.hypot(b[0] - a[0], b[1] - a[1])
+        mu_, mv_ = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+        r = min(3.2, L_ * 0.36)
+        yc = ytop - r - 2.5
+        ux, uv = (b[0] - a[0]) / L_, (b[1] - a[1]) / L_
+        P = lambda s_, y, o: W(mu_ + ux * s_ + n[0] * o, y, mv_ + uv * s_ + n[1] * o)
+        for o, rr, col in ((0.25, r + 0.35, '#3a3330'), (0.35, r, '#f4f1e6')):
+            for t in range(16):
+                a0, a1 = t * math.pi / 8, (t + 1) * math.pi / 8
+                mesh.poly([P(0, yc, o), P(rr * math.cos(a0), yc + rr * math.sin(a0), o), P(rr * math.cos(a1), yc + rr * math.sin(a1), o)], L['paint'], col)
+        for ang_, ln in ((math.radians(60), 0.55), (math.radians(-80), 0.85)):      # ten past two
+            dx_, dy_ = math.cos(ang_), math.sin(ang_)
+            w_ = 0.12
+            mesh.poly([P(-dy_ * w_, yc + dx_ * w_, 0.45), P(dx_ * r * ln - dy_ * w_, yc + dy_ * r * ln + dx_ * w_, 0.45),
+                       P(dx_ * r * ln + dy_ * w_, yc + dy_ * r * ln - dx_ * w_, 0.45), P(dy_ * w_, yc - dx_ * w_, 0.45)], L['paint'], '#2b2622')
+
+if T.get('ring'):
+    # Capella Tower's crown: an open ring of white steel on the drum, ribs rising round it to a band, as wide as the drum
+    # and up to where the survey's returns end. (The survey's slices of the crown itself, a ring of thin steel, are the
+    # bands over the drum's roof: they were left out above)
+    ring, ytop, rise = CROWN
+    mu_, mv_ = sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)
+    r = math.sqrt(area(ring) / math.pi) * 0.96
+    for t in range(32):
+        a0, a1 = t * math.pi / 16, (t + 1) * math.pi / 16
+        p0, p1 = (mu_ + r * math.cos(a0), mv_ + r * math.sin(a0)), (mu_ + r * math.cos(a1), mv_ + r * math.sin(a1))
+        mesh.poly([W(p0[0], ytop + rise - 1.4, p0[1]), W(p1[0], ytop + rise - 1.4, p1[1]), W(p1[0], ytop + rise, p1[1]), W(p0[0], ytop + rise, p0[1])], L['metal'], '#eef0f0')
+        if t % 2 == 0:
+            d = 0.35
+            q0 = (p0[0] - math.sin(a0) * d, p0[1] + math.cos(a0) * d)
+            mesh.poly([W(p0[0], ytop, p0[1]), W(q0[0], ytop, q0[1]), W(q0[0], ytop + rise, q0[1]), W(p0[0], ytop + rise, p0[1])], L['metal'], '#eef0f0')
+
+if T.get('sign'):
+    # The Gold Medal Flour sign: red capitals on a dark steel frame standing on the elevator's highest roof, reading
+    # both ways, along its length
+    word, px = T['sign']
+    # the highest roof of any size (the sign stands on the headhouse, not on the stair tower over it)
+    wall = max((b for b in bands if b[2] is not None and area(b[2]) > 150), key=lambda b: b[3])
+    ring, ytop = wall[2], wall[3]
+    box = rect_of(ring, min_rect(ring)[2])
+    k = max(range(4), key=lambda k: math.hypot(box[k][0] - box[k - 1][0], box[k][1] - box[k - 1][1]))
+    a, b = box[k - 1], box[k]
+    n = outward(box, a, b)
+    mu_, mv_ = sum(p[0] for p in box) / 4, sum(p[1] for p in box) / 4
+    # the frame's line runs down the middle of the roof, the length of the word plus a little
+    while letters(word, px, a, b, 0, n, 0, '#000000', 'paint') is None:
+        px *= 0.9
+    mesh.tris = mesh.tris[:-sum(bits.count('1') for ch in word for bits in FONT[ch])]
+    da, db = (a[0] - (a[0] + b[0]) / 2, a[1] - (a[1] + b[1]) / 2), (b[0] - (a[0] + b[0]) / 2, b[1] - (a[1] + b[1]) / 2)
+    ca_, cb_ = (mu_ + da[0], mv_ + da[1]), (mu_ + db[0], mv_ + db[1])
+    y_mid = ytop + 2.0 + 2.5 * px
+    width = len(word) * 4 * px
+    L_ = math.hypot(cb_[0] - ca_[0], cb_[1] - ca_[1])
+    ux, uv = (cb_[0] - ca_[0]) / L_, (cb_[1] - ca_[1]) / L_
+    f0, f1 = (L_ - width) / 2, (L_ + width) / 2
+    for o in (0.15, -0.15):
+        q = lambda ss, yy: W(ca_[0] + ux * ss + n[0] * o, yy, ca_[1] + uv * ss + n[1] * o)
+        mesh.poly([q(f0, ytop), q(f1, ytop), q(f1, ytop + 2.0 + 5.2 * px), q(f0, ytop + 2.0 + 5.2 * px)], L['fence'], '#3a3634')
+    letters(word, px, ca_, cb_, y_mid, n, 0.3, '#e0312a')
+    letters(word, px, cb_, ca_, y_mid, (-n[0], -n[1]), 0.3, '#e0312a')
+    print('sign', word, 'letters', round(5 * px, 1), 'm tall')
 
 rings_out = [[to_world(*p) for p in simplify(r, 0.5)] for r in loc]
 gy = gh(GX, GZ)
-top = max(b[3] for b in bands)
+top = max(b[3] for b in bands) + (CROWN[2] if T.get('ring') else 0)
 mesh.write(os.path.join(HERE, 'heroes', NAME + '.json'), NAME, GX, GZ, top, rings_out)
 # heights in the record are above the ground at its middle; the survey's ground there is G0, the game's gy (eased)
 print('game ground', round(gy, 2), 'survey ground', round(G0, 2))

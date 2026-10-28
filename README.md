@@ -35,7 +35,10 @@ Dean Parkway, and next door the Calhoun Beach Club and its apartment towers (`to
 big stepped buildings, from the LiDAR and the aerial photo) with the Club's grounds (with 2905's garage and lot, front walks out to the parkway's sidewalk, house numbers, dressed windows,
 fire escapes and the rest round the back). Downtown's towers are modelled whole from the survey by `tools/mpls-drive/hero_tower.py`:
 the Foshay Tower's tapering obelisk and pyramid cap with its name under it, Wells Fargo Center's setbacks and crown, and
-the IDS Center (the tower's notched corners, the Crystal Court's stepped roof, the Marquette Hotel and the low wings). Cars a hero lists (`pk`) stand parked there, drawn by `js/mpls-parked.js`
+the IDS Center (the tower's notched corners, the Crystal Court's stepped roof, the Marquette Hotel and the low wings),
+Capella Tower with its open steel ring on the drum, City Hall's clock tower with its four clocks, the Basilica's dome and
+lantern, Rand Tower, and the Gold Medal Flour elevator under its sign. The Stone Arch Bridge's arches, piers and the steel
+truss span over the lock are traced from the survey under the deck (`tools/mpls-drive/heroes/model_stone_arch.py`). Cars a hero lists (`pk`) stand parked there, drawn by `js/mpls-parked.js`
 with the traffic's own car models, lamps dark, and solid. `tools/mpls-drive/place_heroes.py` puts one into the baked tiles without a full re-bake.
 
 Dressed from the city's own records (`tools/mpls-drive/fetch_city.py`, `bake_transit.py`):

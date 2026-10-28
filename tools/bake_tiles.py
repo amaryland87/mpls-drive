@@ -229,7 +229,7 @@ for e in load('paths'):
             or str(t.get('layer', '0')).startswith('-') or not e.get('geometry')):
         continue
     w = 4.2 if t.get('service') == 'alley' else 3.2 if t.get('highway') == 'cycleway' or t.get('bicycle') == 'designated' else 2.4
-    paths.append(([m(p['lat'], p['lon']) for p in e['geometry']], w, t))
+    paths.append(([m(p['lat'], p['lon']) for p in e['geometry']], w, dict(t, _id=e['id'])))
 
 # Where the pavement is (streets and paths on the ground, not bridges or tunnels), in 20 m cells,
 # so nothing solid (a fence, a pier) ends up standing across a way through.
@@ -1226,7 +1226,22 @@ for cp, cw, hs, unclassified in chains:
         for t in range(0, APPROACH + 1, 4):
             k = t / APPROACH
             raise_ground(e[0] + ox * t, e[1] + oz * t, h_end + (far - h_end) * k * k * (3 - 2 * k), w / 2 + 2)
-# Piers about every 30 m where the deck is well up, never in the street or path the bridge crosses.
+# Piers about every 30 m where the deck is well up, never in the street or path the bridge crosses, nor under a bridge
+# modelled whole as a hero (HERO_BRIDGES: its own piers and arches are in heroes/).
+HERO_BRIDGES = {23115958}            # the Stone Arch Bridge (heroes/model_stone_arch.py)
+hero_bridge_segs = [seg for pts, w, t in paths if t.get('_id') in HERO_BRIDGES for seg in zip(pts, pts[1:])]
+
+
+def under_hero_bridge(x, z):
+    for (ax, az), (bx, bz) in hero_bridge_segs:
+        ex, ez = bx - ax, bz - az
+        L2 = ex * ex + ez * ez or 1e-9
+        t = max(0, min(1, ((x - ax) * ex + (z - az) * ez) / L2))
+        if math.hypot(x - ax - ex * t, z - az - ez * t) < 6:
+            return True
+    return False
+
+
 for cp, cw, hs, _ in chains:
     cum = [0]
     for a, b in zip(cp, cp[1:]):
@@ -1234,7 +1249,8 @@ for cp, cw, hs, _ in chains:
     next_pier = 30
     for k in range(len(cp) - 1):
         pier = 0
-        if next_pier <= cum[k] < cum[-1] - 8 and hs[k] - ground(*cp[k]) > 2.5 and not on_pavement(*cp[k], 1.5):
+        if next_pier <= cum[k] < cum[-1] - 8 and hs[k] - ground(*cp[k]) > 2.5 and not on_pavement(*cp[k], 1.5) \
+                and not under_hero_bridge(*cp[k]):
             pier, next_pier = 1, cum[k] + 30
         if math.hypot(cp[k + 1][0] - cp[k][0], cp[k + 1][1] - cp[k][1]) > 0.5:
             bridges.append((cp[k][0], cp[k][1], cp[k + 1][0], cp[k + 1][1], cw[k], hs[k] * 10, hs[k + 1] * 10, pier))
