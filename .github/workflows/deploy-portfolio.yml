@@ -1,0 +1,23 @@
+# The portfolio (sometimesfunctional.com, on Cloudflare Pages) builds Mpls Drive in from this repo's main branch, so a
+# push here asks Cloudflare to rebuild it. CF_DEPLOY_HOOK is the Pages project's deploy hook URL (Settings > Builds >
+# Deploy hooks); without it this does nothing.
+name: Deploy portfolio
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger the Cloudflare Pages build
+        env:
+          HOOK: ${{ secrets.CF_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::warning::No CF_DEPLOY_HOOK secret, so the portfolio isn't rebuilt"
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK"
