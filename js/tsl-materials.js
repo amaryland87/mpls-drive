@@ -26,6 +26,7 @@ import {
   cameraProjectionMatrix,
   cameraViewMatrix,
   screenSize,
+  screenCoordinate,
   uv,
   time,
   sin,
@@ -1250,7 +1251,7 @@ const TREE_WIND = vec2(0.86, 0.51);
  * pass (alpha-tested in the shadow maps: dappled shadows). Wind: gusts rolling across the city sway the crowns
  * (shadows follow), branches bob and leaves flutter.
  */
-function createTreeMaterial(leafAtlas) {
+function createTreeMaterial(leafAtlas, fade = null) {
   // Use alpha-test nodes rather than `alphaTest`: switching that property on the shared shadow material
   // changes its version and forces shader-cache checks for shadow casters.
   const mat = new TreeNodeMaterial({
@@ -1290,9 +1291,23 @@ function createTreeMaterial(leafAtlas) {
   })();
 
   // Coverage: leaf cards from the atlas; bark is opaque from outside (its back faces are dropped)
-  const alpha = mix(float(frontFacing), leaf.a, isLeaf);
+  const whole = mix(float(frontFacing), leaf.a, isLeaf);
+  let alpha = whole;
+  // [Mpls] One level of detail dissolving into the next (mpls-trees.js): with fade = { near: [d0, d1], far: [d0, d1] }
+  // (either may be missing) and the tree's place in aTreePos (instanced vec3), the tree comes in between near's two
+  // distances from the camera and goes out between far's, a screen-door of pixels at a time. The level before it goes
+  // out over the same distances as this one comes in, and the two keep opposite pixels (the same noise, the same
+  // per-tree shift), so between them they always draw the whole tree. The shadows are left whole.
+  if (fade) {
+    const dist = varying(length(attribute('aTreePos', 'vec3').sub(cameraPosition)));
+    const noise = fract(sin(dot(screenCoordinate.xy, vec2(12.9898, 78.233))).mul(43758.5453).add(rnd));
+    let keep = float(1.0);
+    if (fade.near) keep = keep.mul(step(noise, smoothstep(fade.near[0], fade.near[1], dist).sub(0.0001)));
+    if (fade.far) keep = keep.mul(step(smoothstep(fade.far[0], fade.far[1], dist), noise));
+    alpha = alpha.mul(keep);
+  }
   mat.alphaTestNode = float(0.5);
-  mat.maskShadowNode = alpha.greaterThan(0.5);
+  mat.maskShadowNode = whole.greaterThan(0.5);
 
   mat.colorNode = Fn(() => {
     // Leaves: per-tree tint x atlas brightness, a share of sun-yellowed and of cooler leaves, brown twigs & stalks,

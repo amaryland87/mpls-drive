@@ -13,7 +13,7 @@ import {
   cityUniforms, evaluateApartmentInterior, createRoadSurfaceMaterial, createRoadPaintMaterial, createSidewalkMaterial,
   createCurbMaterial, createWaterMaterial, createPavedStreetMaterial,
 } from './tsl-materials.js';
-import { decodeGround, setGround, groundH, bridgeList, bridgeHeightAt, bridgeArrays, cityXZ, PIECE, ROAD_Y, WALK_Y, SOLID_CELL } from './mpls-geo.js';
+import { decodeGround, setGround, groundH, bridgeList, bridgeHeightAt, cityXZ, PIECE, ROAD_Y, WALK_Y, SOLID_CELL } from './mpls-geo.js';
 import { createTreeField } from './mpls-trees.js';
 import { createStadium } from './mpls-stadium.js';
 import { ground as sharedGround } from './ground.js';
@@ -33,10 +33,13 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
   const DETAIL_R = lowPower ? 650 : 1000;        // houses, streets, lamps and trees within this of the camera
   const MAX_ANISO = renderer.getMaxAnisotropy();
 
+  // (the two together, not one after the other)
+  const groundFile = fetch(base + 'ground.bin').then((r) => { if (!r.ok) throw new Error('ground.bin: ' + r.status); return r.arrayBuffer(); });
+  groundFile.catch(() => {});
   const index = await fetch(base + 'index.json').then((r) => { if (!r.ok) throw new Error('index.json: ' + r.status); return r.json(); });
   const [x0, x1, z0, z1] = index.bounds;
   const MAP = { x0, x1, z0, z1, tile: index.tile, ni: index.ni, nj: index.nj };
-  let buf = await fetch(base + 'ground.bin').then((r) => { if (!r.ok) throw new Error('ground.bin: ' + r.status); return r.arrayBuffer(); });
+  let buf = await groundFile;
   const head = new Uint8Array(buf, 0, 2);
   if (head[0] === 0x1f && head[1] === 0x8b) {     // still gzipped (no server unpacked it on the way)
     buf = await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
@@ -45,6 +48,9 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
   setGround(ground);
 
   const worker = new Worker(new URL('./mpls-worker.js', import.meta.url), { type: 'module' });
+  // What it sends before the page is ready to take it (the bridges, built while the facades load) is kept for then
+  const early = [];
+  worker.onmessage = (e) => early.push(e);
   worker.postMessage({
     type: 'init', base: new URL(base, location.href).href,
     ground: { ...ground, h: ground.h.slice() },
@@ -252,16 +258,31 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
       }
     }
   }
-  {
-    const A = bridgeArrays(bridges);
-    if (A) {
-      const g = new THREE.BufferGeometry();
-      for (const [k, v] of Object.entries(A)) g.setAttribute(k, new THREE.BufferAttribute(v, 3));
-      g.computeBoundingSphere();
-      const m = new THREE.Mesh(g, bridgeMat);
-      m.castShadow = m.receiveShadow = !lowPower;
-      m.name = 'MplsBridges';
-      scene.add(m);
+  // [Mpls] The decks are drawn in 2 km cells, built in the worker (mpls-geo.js bridgeMeshes) while the first tiles
+  // load: the asphalt, sidewalks, curbs and lines in the streets' own materials, and the parapets, fascias and piers.
+  // The sidewalks, curbs and lines are only drawn near the camera.
+  const bridgeCellsDrawn = [];
+  let bridgesDrawn = false;
+  function finishBridges(cells) {
+    for (const C of cells) {
+      const near = [];
+      for (const [A, mat, cast, far] of [[C.body, bridgeMat, true, true], [C.road, roadMat, false, true], [C.walk, walkMat, false, false],
+        [C.curb, curbMat, false, false], [C.paint, paintMat, false, false]]) {
+        const m = meshOf(A, mat, cast);
+        if (!m) continue;
+        m.name = 'MplsBridges';
+        scene.add(m);
+        if (!far) near.push(m);
+      }
+      bridgeCellsDrawn.push({ x: C.x, z: C.z, near });
+    }
+    bridgesDrawn = true;
+  }
+  const BRIDGE_NEAR = lowPower ? 1800 : 2600;    // (from the middle of a 2 km cell)
+  function showBridges(x, z) {
+    for (const C of bridgeCellsDrawn) {
+      const on = Math.hypot(C.x - x, C.z - z) < BRIDGE_NEAR;
+      for (const m of C.near) m.visible = on;
     }
   }
   const noBridges = [];
@@ -614,6 +635,7 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
 
   worker.onerror = (e) => console.error('[mpls] worker failed to start', e.message || e);
   worker.onmessage = ({ data: msg }) => {
+    if (msg.type === 'bridges') { finishBridges(msg.cells); return; }
     if (msg.type === 'tile') loading--;
     if (msg.type === 'error') {
       console.warn('[mpls] worker', msg.message);
@@ -626,9 +648,10 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
     }
     queue.push(msg);
   };
+  for (const e of early) worker.onmessage(e);
 
-  /** Load what's near (x, z), nearest first, and drop what's far. */
-  function stream(x, z) {
+  /** Load what's near (x, z), nearest first (no more than `atOnce` on their way at a time), and drop what's far. */
+  function stream(x, z, atOnce = 3) {
     const want = [];
     const now = performance.now();
     for (let j = 0; j < MAP.nj; j++) for (let i = 0; i < MAP.ni; i++) {
@@ -640,7 +663,7 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
     }
     want.sort((a, b) => a[0] - b[0]);
     for (const [, i, j] of want) {
-      if (loading >= 3) break;
+      if (loading >= atOnce) break;
       loadTile(i, j);
     }
   }
@@ -694,6 +717,7 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
       streamTimer = 0.25;
       stream(focus.x, focus.z);
       streamDetail(camera.position.x, camera.position.z);
+      showBridges(camera.position.x, camera.position.z);
     }
     drain(focus.x, focus.z, !tileAt(focus.x, focus.z));
     stepLampLights(camera);
@@ -712,7 +736,7 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
       const done = near.filter((t) => t?.ready).length + pieces.filter((P) => P.built).length;
       const total = near.length + pieces.length;
       onProgress(done / Math.max(1, total));
-      if (near.every((t) => t?.ready) && pieces.every((P) => P.built)) break;
+      if (bridgesDrawn && near.every((t) => t?.ready) && pieces.every((P) => P.built)) break;
       await new Promise((res) => setTimeout(res, 50));
     }
   }
@@ -746,6 +770,7 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
     c = {
       minX: cx - ex, maxX: cx + ex, minZ: cz - ez, maxZ: cz + ez, minY: -1e4, maxY: S.h[i],
       obb: { cx, cz, hx, hz, cs: ux, sn: -uz }, _order: (t.i * 64 + t.j) * 4194304 + i,
+      post: L <= 0.01,                      // a tree trunk or a post, not a wall (controllers.js: the car stops against it)
     };
     t.colliders.set(i, c);
     return c;
@@ -802,6 +827,8 @@ export async function createCity({ scene, renderer, base, tex, lowPower = false 
   return {
     MAP, index, nearBuildings, bounds: { x0, x1, z0, z1 }, bridges, tiles, ready, worker,
     groundH, deckAt, surfaceY, surfaceAt, nearColliders, tileAt, update, whenReady,
+    /** Start on the tiles round (x, z) now, ahead of whenReady: the worker gets on with them while the page is busy. */
+    prefetch(x, z) { stream(x, z, 6); },
     setLampLightCount(n) { lampLightCount = clamp(n, 0, LAMP_LIGHTS); },
     trees, cityXZ, overviewURL: new URL('overview.jpg', new URL(base, location.href)).href,
   };

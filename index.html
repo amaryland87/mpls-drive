@@ -19,6 +19,14 @@
     }
   </script>
   <!-- Fetch the city modules in parallel before stylesheets; the module graph controls evaluation order. -->
+  <!-- [Mpls] Everything the first frame waits for starts downloading with the page, not one after another as the
+       scripts get to them: three.js's three files, and the city's index, ground and street graph -->
+  <link rel="modulepreload" href="https://cdn.jsdelivr.net/gh/mrdoob/three.js@fa57cf648fc36a9c5999f0076bfeea4960de50f6/build/three.webgpu.js" />
+  <link rel="modulepreload" href="https://cdn.jsdelivr.net/gh/mrdoob/three.js@fa57cf648fc36a9c5999f0076bfeea4960de50f6/build/three.core.js" />
+  <link rel="modulepreload" href="https://cdn.jsdelivr.net/gh/mrdoob/three.js@fa57cf648fc36a9c5999f0076bfeea4960de50f6/build/three.tsl.js" />
+  <link rel="preload" href="./city/index.json" as="fetch" crossorigin="anonymous" />
+  <link rel="preload" href="./city/ground.bin" as="fetch" crossorigin="anonymous" />
+  <link rel="preload" href="./data/roads.json" as="fetch" crossorigin="anonymous" />
   <link rel="modulepreload" href="./js/city-config.js" />
   <link rel="modulepreload" href="./js/mpls-geo.js" />
   <link rel="modulepreload" href="./js/mpls-shapeutils.js" />

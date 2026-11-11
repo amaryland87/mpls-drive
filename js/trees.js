@@ -729,17 +729,21 @@ function placeCards(sp, branches, lod, tileMeters, rng, crown) {
         cards.push({ at, up, face, size: size * R(1.35, 1.6), tile: sp.tile });
       }
     }
-  } else {
+  }
+  // [Mpls] The near levels have the far level's whole-crown cards too, smaller and further in: a leafy core behind
+  // the sprays, so a tree is as full close to as it is from across the park and keeps its look from level to level
+  // (sprays alone left the near trees thin, and they filled out all at once on dropping to the far level)
+  {
     // Fibonacci directions over the crown, fewer underneath; cards centred just inside the shell, facing out
-    const n = 18;
+    const n = lod === 2 ? 18 : 12, depth = lod === 2 ? 0.58 : 0.4;
     const meanR = (crown.R.x + crown.R.y + crown.R.z) / 3;
-    const s = Math.max(meanR * 1.25, 2.4);
+    const s = Math.max(meanR * 1.25, 2.4) * (lod === 2 ? 1 : 0.8);
     for (let i = 0; i < n; i++) {
       const y = 1 - (i + 0.5) / n * 1.55; // 1 .. -0.55
       const r = Math.sqrt(Math.max(0, 1 - y * y));
       const ph = i * 2.39996 + R(-0.2, 0.2);
       const dir = new V3(Math.cos(ph) * r, y, Math.sin(ph) * r);
-      const center = crown.C.clone().add(dir.clone().multiply(crown.R).multiplyScalar(0.58));
+      const center = crown.C.clone().add(dir.clone().multiply(crown.R).multiplyScalar(depth));
       const face = dir.clone().add(new V3(R(-0.25, 0.25), R(-0.25, 0.25), R(-0.25, 0.25))).normalize();
       let up = new V3(0, 1, 0).addScaledVector(face, -face.y);
       if (up.lengthSq() < 1e-3) up = new V3(1, 0, 0);

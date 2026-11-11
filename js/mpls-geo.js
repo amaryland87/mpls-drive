@@ -416,6 +416,34 @@ function garageGeo(G, g) {
 const FENCE_COLS = ['#b08f6a', '#9c9a94', '#eeeeea', '#8a6e52'].map(color);
 const HEDGE = color('#3d6a34'), STONE = color('#cfc6b5');
 const FENCE_H = [1.8, 1.2, 1.6, 0.9];      // kind 3: a low rail fence, as along the lake paths
+// [Mpls] The decks (bridgeList's), for what mustn't stand in a bridge's roadway: the fences and walls mapped along the
+// Midtown Greenway's trench (and the like) run on under the street bridges over it, and the ground here is the bridge,
+// so drawn where they're mapped they'd stand across the street.
+const DECK_CELL = 32;
+let deckCells = null;
+export function setDecks(list) {
+  deckCells = new Map();
+  for (const p of list) {
+    const k = Math.floor((p.ax + p.ux * p.L / 2) / DECK_CELL) * 100000 + Math.floor((p.az + p.uz * p.L / 2) / DECK_CELL);
+    if (!deckCells.has(k)) deckCells.set(k, []);
+    deckCells.get(k).push(p);
+  }
+}
+/** Whether (x, z) is on a deck (or within `margin` metres of its edge) less than `reach` over the ground there. */
+export function onDeckRoadway(x, z, reach = 2, margin = 0.5) {
+  if (!deckCells) return false;
+  const g = groundH(x, z);
+  for (let i = Math.floor(x / DECK_CELL) - 1; i <= Math.floor(x / DECK_CELL) + 1; i++) {
+    for (let j = Math.floor(z / DECK_CELL) - 1; j <= Math.floor(z / DECK_CELL) + 1; j++) {
+      for (const p of deckCells.get(i * 100000 + j) || []) {
+        const dx = x - p.ax, dz = z - p.az, t = dx * p.ux + dz * p.uz;
+        if (t < -margin || t > p.L + margin || Math.abs(-dx * p.uz + dz * p.ux) > p.w / 2 + margin) continue;
+        if (bridgeHeightAt(p, t) - g < reach) return true;
+      }
+    }
+  }
+  return false;
+}
 /** Fences, garden walls and hedges along their mapped lines. */
 function fenceGeo(G, f, seed) {
   const [kind, n] = f;
@@ -433,6 +461,8 @@ function fenceGeo(G, f, seed) {
   const ht = FENCE_H[kind];
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i], b = pts[i + 1];
+    // (one that would come up through a deck, or stand on it, is left out)
+    if ([a, b, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]].some((q) => onDeckRoadway(q[0], q[1], ht + 0.6))) continue;
     G.seat([a, b]);
     if (kind === 0 || kind === 3) { wall(G, a, b, 0, ht, LAYER.fence, col); continue; }
     const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
@@ -1222,30 +1252,77 @@ export function fitLamps(detail, T, sidewalkAt) {
    evenly between the heights baked for its two ends, which meet the ground where it lands.
    [Mpls] index.json keeps the pieces' ends to the whole metre and their heights to 10 cm, so a deck read straight off
    it zigzags a little at every joint (pieces are about 7 m) and climbs in uneven steps. The pieces that run on from one
-   another are put back together into their decks, and each deck's line and heights smoothed (its ends stay where they
-   are, so decks meeting there still meet). A deck that ends on another one partway along (a ramp onto a viaduct) is
-   brought to that one's height there; one that ends a little over the street is brought down onto it. Each piece
-   carries the mitres at its two ends (na, nb: the way out to the side, scaled to meet the next piece's), so the decks
-   are drawn as one unbroken ribbon.                                                                               */
+   another are put back together into their decks (and decks that meet end to end, one OpenStreetMap way after
+   another, into one), and each deck's line and heights smoothed (its ends stay where they are, so decks meeting there
+   still meet). A deck that ends on another one partway along (a ramp onto a viaduct) is brought to that one's height
+   there; one that ends a little over the street is brought down onto it. Decks that lie over one another at about one
+   height (a divided road's two roadways, a ramp leaving a viaduct, the footway beside a road) are one roadway in
+   life, so they're brought level where they overlap. Each piece carries the mitres at its two ends (na, nb: the way
+   out to the side, scaled to meet the next piece's) and its width there (wa, wb), so the decks are drawn as one
+   unbroken ribbon.                                                                                                */
 const DECK_JOIN = 40;          // metres a deck eases over to meet another (or the ground)
+const DECK_MERGE = 1.0;        // decks within this height of one another where they overlap are one roadway
+const DECK_TOP = 0.06;         // the driving surface over a deck's height (mpls-city.js surfaceY)
 export function bridgeList(br8) {
   const chains = [];
   let c = null;
   for (let i = 0; i < br8.length; i += 8) {
     const [ax, az, bx, bz, w, ha10, hb10, pier] = br8.slice(i, i + 8);
-    if (!c || c.ex !== ax || c.ez !== az) {
-      c = { ex: ax, ez: az, x: [ax], z: [az], h: [ha10 / 10], w: [], pier: [], arch: [] };
+    // (a piece that doubles back from the one before isn't the same deck: a ramp and the road it joins, both ending
+    // at one abutment, come one after the other)
+    const n = c ? c.x.length : 0;
+    if (!c || c.ex !== ax || c.ez !== az || (n > 1 && (bx - ax) * (ax - c.x[n - 2]) + (bz - az) * (az - c.z[n - 2]) < 0)) {
+      c = { ex: ax, ez: az, x: [ax], z: [az], h: [ha10 / 10], w: [], pier: [0] };
       chains.push(c);
     }
     if (Math.hypot(bx - ax, bz - az) < 0.5) continue;
+    if (pier) c.pier[c.pier.length - 1] = 1;
     c.ex = bx; c.ez = bz;
-    c.x.push(bx); c.z.push(bz); c.h.push(hb10 / 10); c.w.push(w); c.pier.push(pier);
-    c.arch.push(Math.hypot(bx - ax, bz - az) > 180 && (i / 8) % 2 === 0);
+    c.x.push(bx); c.z.push(bz); c.h.push(hb10 / 10); c.w.push(w); c.pier.push(0);
   }
-  const decks = chains.filter((d) => d.x.length >= 2);
   const key = (x, z) => x * 100003 + z;
+  // Decks that meet end to end are one deck: joined, its line and heights are smoothed through
+  // the joint and it's drawn mitred there like any other.
+  const decks = [];
+  {
+    const parts = chains.filter((d) => d.x.length >= 2), at = new Map(), used = new Uint8Array(parts.length);
+    const put = (k, i) => { const l = at.get(k); if (l) l.push(i); else at.set(k, [i]); };
+    parts.forEach((d, i) => { put(key(d.x[0], d.z[0]), i); put(key(d.ex, d.ez), i); });
+    const turned = (d) => ({ x: d.x.slice().reverse(), z: d.z.slice().reverse(), h: d.h.slice().reverse(), w: d.w.slice().reverse(), pier: d.pier.slice().reverse() });
+    // (at a fork, the one that runs straightest on; none that turns a corner)
+    const grow = (d, last) => {
+      for (;;) {
+        const n = d.x.length - 1, ax = d.x[n] - d.x[n - 1], az = d.z[n] - d.z[n - 1], la = Math.hypot(ax, az);
+        let best = -1, bc = 0.7, be = null;
+        for (const o of at.get(key(d.x[n], d.z[n])) || []) {
+          if (o === last || used[o]) continue;
+          let e = parts[o];
+          if (e.x[0] !== d.x[n] || e.z[0] !== d.z[n]) e = turned(e);
+          const bx = e.x[1] - e.x[0], bz = e.z[1] - e.z[0], cs = (ax * bx + az * bz) / (la * Math.hypot(bx, bz));
+          if (cs > bc) { best = o; bc = cs; be = e; }
+        }
+        if (best < 0) return;
+        used[best] = 1;
+        d.pier[n] = d.pier[n] || be.pier[0];
+        d.x.push(...be.x.slice(1)); d.z.push(...be.z.slice(1)); d.h.push(...be.h.slice(1)); d.w.push(...be.w); d.pier.push(...be.pier.slice(1));
+        last = best;
+      }
+    };
+    parts.forEach((d0, i) => {
+      if (used[i]) return;
+      used[i] = 1;
+      let d = { x: d0.x.slice(), z: d0.z.slice(), h: d0.h.slice(), w: d0.w.slice(), pier: d0.pier.slice() };
+      grow(d, i);
+      d = turned(d);
+      grow(d, i);
+      decks.push(d);
+    });
+  }
   const endCount = new Map();
-  for (const d of decks) for (const k of [key(d.x[0], d.z[0]), key(d.ex, d.ez)]) endCount.set(k, (endCount.get(k) || 0) + 1);
+  for (const d of decks) {
+    const n = d.x.length - 1;
+    for (const k of [key(d.x[0], d.z[0]), key(d.x[n], d.z[n])]) endCount.set(k, (endCount.get(k) || 0) + 1);
+  }
 
   // The line: each joint pulled toward its neighbours (no more than a metre: the rounding is half that), and the heights
   // likewise, the ends held.
@@ -1265,6 +1342,8 @@ export function bridgeList(br8) {
     }
     d.cum = [0];
     for (let k = 1; k < n; k++) d.cum.push(d.cum[k - 1] + Math.hypot(d.x[k] - d.x[k - 1], d.z[k] - d.z[k - 1]));
+    // How wide it is at each joint: the wider of the pieces either side, so a deck that widens does it over a piece
+    d.nw = d.x.map((_, k) => Math.max(d.w[Math.max(0, k - 1)], d.w[Math.min(n - 2, k)]));
   }
   const ease = (d, end, off, span) => {
     const L = d.cum[d.cum.length - 1];
@@ -1308,7 +1387,7 @@ export function bridgeList(br8) {
     decks.forEach((d, di) => {
       for (const end of [0, -1]) {
         const k = end === 0 ? 0 : d.x.length - 1;
-        if (endCount.get(key(end === 0 ? d.x[0] : d.ex, end === 0 ? d.z[0] : d.ez)) > 1) continue;   // meets another's end
+        if (endCount.get(key(d.x[k], d.z[k])) > 1) continue;   // meets another's end
         const L = d.cum[d.cum.length - 1], span = Math.min(DECK_JOIN, L / 2), h = d.h[k];
         const on = deckUnder(d.x[k], d.z[k], di, h);
         if (on !== null) {
@@ -1323,8 +1402,77 @@ export function bridgeList(br8) {
     for (const [d, end, off, span] of moves) ease(d, end, off, span);
   }
 
+  // One roadway where decks overlap: each joint that has another deck over (or under) it within DECK_MERGE is drawn
+  // toward the height they'd share, round after round, the decks settling level with one another side by side. The
+  // ends that land on the ground stay there; the ends where several decks meet move together.
+  {
+    const meet = new Map(), links = [];
+    decks.forEach((d, di) => {
+      const n = d.x.length;
+      d.fixed = new Uint8Array(n);
+      d.h0 = d.h.slice();
+      d.linked = new Uint8Array(n);
+      for (const k of [0, n - 1]) {
+        const ek = key(d.x[k], d.z[k]);
+        if (endCount.get(ek) > 1) { if (!meet.has(ek)) meet.set(ek, []); meet.get(ek).push([d, k]); }
+        else if (d.h[k] - groundH(d.x[k], d.z[k]) < 0.3) d.fixed[k] = 1;
+      }
+      for (let k = 0; k < n; k++) {
+        if (d.fixed[k]) continue;
+        const x = d.x[k], z = d.z[k], own = d.nw[k] / 2;
+        for (let i = Math.floor(x / CELL) - 1; i <= Math.floor(x / CELL) + 1; i++) {
+          for (let j = Math.floor(z / CELL) - 1; j <= Math.floor(z / CELL) + 1; j++) {
+            for (const [ei, m] of cells.get(i * 100000 + j) || []) {
+              if (ei === di) continue;
+              const e = decks[ei], L = e.cum[m + 1] - e.cum[m];
+              if (L < 0.01) continue;
+              const ux = (e.x[m + 1] - e.x[m]) / L, uz = (e.z[m + 1] - e.z[m]) / L, dx = x - e.x[m], dz = z - e.z[m];
+              const t = dx * ux + dz * uz;
+              // over it or beside it, the two overlapping by a metre or more
+              if (t < 0 || t > L || Math.abs(-dx * uz + dz * ux) > e.w[m] / 2 + own - 1) continue;
+              if (Math.abs(e.h[m] + (e.h[m + 1] - e.h[m]) * t / L - d.h[k]) < 2 * DECK_MERGE) { links.push([d, k, e, m, t / L]); d.linked[k] = 1; }
+            }
+          }
+        }
+      }
+    });
+    for (let round = 0; round < 12 && links.length; round++) {
+      const sum = new Map();
+      for (const [d, k, e, m, f] of links) {
+        const he = e.h[m] + (e.h[m + 1] - e.h[m]) * f, gap = Math.abs(he - d.h[k]);
+        const wgt = 1 - clamp((gap - DECK_MERGE * 0.6) / (DECK_MERGE * 0.4), 0, 1);
+        if (wgt <= 0) continue;
+        let s = sum.get(d);
+        if (!s) sum.set(d, s = { h: new Float64Array(d.x.length), w: new Float64Array(d.x.length) });
+        s.h[k] += he * wgt; s.w[k] += wgt;
+      }
+      // (no joint by more than 0.75 m in all: decks further apart than that aren't one roadway)
+      for (const [d, s] of sum) {
+        for (let k = 0; k < d.x.length; k++) if (s.w[k]) d.h[k] = clamp(d.h[k] + 0.5 * ((d.h[k] + s.h[k]) / (1 + s.w[k]) - d.h[k]), d.h0[k] - 0.75, d.h0[k] + 0.75);
+      }
+      for (const ends of meet.values()) {
+        const h = ends.reduce((a, [d, k]) => a + d.h[k], 0) / ends.length;
+        for (const [d, k] of ends) d.h[k] = h;
+      }
+    }
+    // What that moved a joint by eases away along the deck past the overlap, so it leaves no step where the overlap ends
+    for (const d of decks) {
+      const n = d.x.length;
+      if (!d.linked.some((v) => v) || d.linked.every((v) => v)) continue;
+      const off = d.h.map((h, k) => h - d.h0[k]);
+      for (let it = 0; it < 24; it++) {
+        const o = off.slice();
+        for (let k = 0; k < n; k++) {
+          if (d.linked[k] || d.fixed[k] || ((k === 0 || k === n - 1) && endCount.get(key(d.x[k], d.z[k])) > 1)) continue;
+          off[k] = k === 0 ? o[1] * 0.9 : k === n - 1 ? o[n - 2] * 0.9 : 0.45 * (o[k - 1] + o[k + 1]);
+        }
+      }
+      for (let k = 0; k < n; k++) d.h[k] = d.h0[k] + off[k];
+    }
+  }
+
   const out = [];
-  for (const d of decks) {
+  decks.forEach((d, di) => {
     const n = d.x.length;
     for (let k = 0; k < n; k++) d.h[k] = Math.max(d.h[k], groundH(d.x[k], d.z[k]));
     // The way out to the side at each joint: the mitre between the pieces either side (or square, at a hairpin)
@@ -1337,81 +1485,278 @@ export function bridgeList(br8) {
       const ax = -a.uz, az = a.ux, bx = -b.uz, bz = b.ux, dot = 1 + ax * bx + az * bz;
       return dot < 0.5 ? null : [(ax + bx) / dot, (az + bz) / dot];
     };
+    // The widest it gets ranks it among the decks it overlaps (bridgeMeshes): the wider one is drawn whole
+    const rank = Math.max(...d.w) * 10000 - di;
     for (let k = 0; k + 1 < n; k++) {
       const { L, ux, uz } = seg[k];
       if (L < 0.01) continue;
       const own = [-uz, ux];
       out.push({
-        ax: d.x[k], az: d.z[k], ux, uz, L, w: d.w[k], ha: d.h[k], hb: d.h[k + 1], pier: d.pier[k], arch: d.arch[k],
+        ax: d.x[k], az: d.z[k], ux, uz, L, w: Math.max(d.nw[k], d.nw[k + 1]), ha: d.h[k], hb: d.h[k + 1], pier: d.pier[k],
         na: (k > 0 && seg[k - 1].L >= 0.01 && mitre(seg[k - 1], seg[k])) || own,
         nb: (k + 2 < n && seg[k + 1].L >= 0.01 && mitre(seg[k], seg[k + 1])) || own,
+        wa: d.nw[k], wb: d.nw[k + 1], w0: d.w[k], d: di, k, s0: d.cum[k], rank, first: k === 0, last: k === n - 2,
       });
     }
-  }
+  });
   return out;
 }
 export const bridgeHeightAt = (br, t) => br.ha + (br.hb - br.ha) * clamp(t / br.L, 0, 1);
 
-/** Decks with railings, piers down to the ground and a steel arch on the long spans: { position, color } flat-shaded. */
-export function bridgeArrays(list) {
-  const pos = [], col = [];
-  const tri = (p, q, r, c) => { for (const v of [p, q, r]) { pos.push(v[0], v[1], v[2]); col.push(c[0], c[1], c[2]); } };
-  const box = (cx, cy, cz, sx, sy, sz, ang, c) => {
-    const cs = Math.cos(ang), sn = Math.sin(ang);
-    const P = (x, y, z) => [cx + x * cs - z * sn, cy + y, cz + x * sn + z * cs];
-    const hx = sx / 2, hz = sz / 2;
-    const v = [P(-hx, 0, -hz), P(hx, 0, -hz), P(hx, 0, hz), P(-hx, 0, hz), P(-hx, sy, -hz), P(hx, sy, -hz), P(hx, sy, hz), P(-hx, sy, hz)];
-    [[4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]].forEach(([a, b, cc, d], k) => {
-      const shade = k === 0 ? c : scaled(c, 0.86);
-      tri(v[a], v[b], v[cc], shade);
-      tri(v[a], v[cc], v[d], shade);
-    });
+/** Road markings on a deck: PaintGeo's strips (the paint material's attributes), at heights of their own. */
+class DeckPaint {
+  constructor() { this.p = []; this.c = []; this.paint = []; this.side = []; }
+  /** corners: [[x, y, z, distance along, side x, side z] x 4] as a, a', b, b' (the strip's two edges at each end). */
+  strip(k, col, period, duty) {
+    for (const q of [k[0], k[2], k[3], k[0], k[3], k[1]]) {
+      this.p.push(q[0], q[1], q[2]);
+      this.c.push(col[0], col[1], col[2]);
+      this.paint.push(q[3], period, duty);
+      this.side.push(q[4], q[5]);
+    }
+  }
+  arrays() {
+    if (!this.p.length) return null;
+    const position = Float32Array.from(this.p), normal = new Float32Array(position.length);
+    for (let i = 1; i < normal.length; i += 3) normal[i] = 1;
+    return { position, normal, color: Float32Array.from(this.c), paint: Float32Array.from(this.paint), side: Float32Array.from(this.side) };
+  }
+}
+
+/**
+ * The decks as they're drawn, in cells of `cell` metres: [{ x, z, body, road, walk, curb, paint }], each a set of
+ * arrays for the streets' own materials (road: asphalt, walk: sidewalk flags, curb, paint: the markings) and body
+ * (flat-shaded { position, normal, color }: parapets, fascias, undersides and piers).
+ * [Mpls] A road deck is asphalt between sidewalks behind curbs, with a concrete parapet at each edge (a freeway's: its
+ * barriers and no sidewalks; a footbridge's: flags between railings; the light rail's: ballast), and the lines the
+ * street leading onto it has. Where decks overlap at one height the widest is drawn whole and the others only where
+ * they stick out from under it, coming up to meet its surface at the join, and no edge that lies in another deck's
+ * roadway has a sidewalk or a parapet: a divided road's two roadways, or a ramp joining a viaduct, are one stretch of
+ * asphalt with parapets round the outside. The surface is never under the ground: where a deck lies on a hillside it
+ * follows the ground the engine stands things on there.
+ */
+export function bridgeMeshes(list, cell = 2000) {
+  const CELL = 32, grid = new Map();
+  for (const p of list) {
+    const ck = Math.floor((p.ax + p.ux * p.L / 2) / CELL) * 100000 + Math.floor((p.az + p.uz * p.L / 2) / CELL);
+    if (!grid.has(ck)) grid.set(ck, []);
+    grid.get(ck).push(p);
+  }
+  /** Another deck's height at (x, z), or null where it isn't. */
+  const heightOn = (q, x, z) => {
+    const dx = x - q.ax, dz = z - q.az, t = dx * q.ux + dz * q.uz;
+    // (a little past its ends, for the wedge outside a bend, but not past the end of the deck: the deck that runs on
+    // from there isn't under it)
+    if (t < (q.first ? 0.05 : -1) || t > q.L + (q.last ? -0.05 : 1)) return null;
+    if (Math.abs(-dx * q.uz + dz * q.ux) > (q.wa + (q.wb - q.wa) * clamp(t / q.L, 0, 1)) / 2) return null;
+    return bridgeHeightAt(q, t);
   };
-  const deckCol = color('#a7adb3'), railCol = color('#eceae4');
-  const archCol = color('#4f7fb3'), pierCol = color('#c9c2b2'), sideCol = color('#8f959b');
-  for (const br of list) {
-    const { ax, az, ux, uz, L, w, na, nb } = br;
-    const nx = -uz, nz = ux;
-    const steps = Math.max(1, Math.ceil(L / 6));
-    // [Mpls] Out to the side along the mitres at its ends, so it meets the pieces either side edge to edge
-    const P = (t, s, dy) => {
-      const f = t / L, mx = na[0] + (nb[0] - na[0]) * f, mz = na[1] + (nb[1] - na[1]) * f;
-      return [ax + ux * t + mx * s, bridgeHeightAt(br, t) + dy, az + uz * t + mz * s];
-    };
-    for (let k = 0; k < steps; k++) {
-      const t0 = L * k / steps, t1 = L * (k + 1) / steps;
-      const hw = w / 2;
-      tri(P(t0, -hw, 0.06), P(t1, hw, 0.06), P(t1, -hw, 0.06), deckCol);
-      tri(P(t0, -hw, 0.06), P(t0, hw, 0.06), P(t1, hw, 0.06), deckCol);
-      for (const s of [-1, 1]) {
-        tri(P(t0, s * hw, 0.06), P(t1, s * hw, 0.06), P(t1, s * hw, -0.7), sideCol);
-        tri(P(t0, s * hw, 0.06), P(t1, s * hw, -0.7), P(t0, s * hw, -0.7), sideCol);
-        const rs = s * (hw - 0.15);
-        tri(P(t0, rs, 0.06), P(t1, rs, 0.06), P(t1, rs, 1.0), railCol);
-        tri(P(t0, rs, 0.06), P(t1, rs, 1.0), P(t0, rs, 1.0), railCol);
+
+  // Each joint's cross-section: from lo to hi across it (the whole width, less what's under a wider deck), the heights
+  // at those two edges where they're another deck's (yLo, yHi), and whether each edge is an outside edge (free).
+  const TUCK = 1.5;                // a deck goes this far in under the one it's drawn up to
+  const nodes = new Map();
+  const nodeOf = (p, e) => {
+    const id = p.d * 65536 + p.k + e;
+    let N = nodes.get(id);
+    if (N) return N;
+    const x = e ? p.ax + p.ux * p.L : p.ax, z = e ? p.az + p.uz * p.L : p.az, n = e ? p.nb : p.na;
+    const hw = (e ? p.wb : p.wa) / 2, h = e ? p.hb : p.ha;
+    const cand = [];
+    for (let i = Math.floor(x / CELL) - 1; i <= Math.floor(x / CELL) + 1; i++) {
+      for (let j = Math.floor(z / CELL) - 1; j <= Math.floor(z / CELL) + 1; j++) {
+        for (const q of grid.get(i * 100000 + j) || []) if (q.d !== p.d && Math.abs((q.ha + q.hb) / 2 - h) < DECK_MERGE + 2) cand.push(q);
       }
-      tri(P(t0, -hw, -0.7), P(t1, -hw, -0.7), P(t1, hw, -0.7), sideCol);
-      tri(P(t0, -hw, -0.7), P(t1, hw, -0.7), P(t0, hw, -0.7), sideCol);
     }
-    const ang = Math.atan2(uz, ux);
-    if (br.pier) {
-      const g = groundH(ax, az), top = br.ha - 0.6;
-      if (top - g > 2.5) box(ax, g - 1, az, 2.5, top - g + 1, w * 0.7, ang, pierCol);
+    /** The deck over the point s metres out from the middle: the highest-ranking one that outranks this (or any). */
+    const over = (s, any = false) => {
+      const px = x + n[0] * s, pz = z + n[1] * s;
+      let best = null, rank = any ? -Infinity : p.rank;
+      for (const q of cand) {
+        if (q.rank <= rank) continue;
+        const hq = heightOn(q, px, pz);
+        if (hq !== null && Math.abs(hq - h) <= DECK_MERGE) { best = hq; rank = q.rank; }
+      }
+      return best;
+    };
+    N = { x, z, n, hw, h, lo: -hw, hi: hw, loB: -hw, hiB: hw, yLo: null, yHi: null, freeL: true, freeR: true, hidden: false, over };
+    if (cand.length) {
+      const covered = (sgn) => { let c = 0; while (c < 2 * hw && over(sgn * (hw - c - 0.05)) !== null) c += 0.5; return c; };
+      const cl = covered(-1), cr = covered(1);
+      if (cl + cr >= 2 * hw - 0.5) N.hidden = true;
+      else {
+        // (loB, hiB: where it comes out from under them)
+        if (cl > 0) { N.loB = -hw + cl; N.lo = Math.max(-hw, N.loB - TUCK); N.yLo = over(N.loB - 0.45); }
+        if (cr > 0) { N.hiB = hw - cr; N.hi = Math.min(hw, N.hiB + TUCK); N.yHi = over(N.hiB + 0.45); }
+      }
+      N.freeL = cl === 0 && over(-hw, true) === null && over(-hw - 0.4, true) === null;
+      N.freeR = cr === 0 && over(hw, true) === null && over(hw + 0.4, true) === null;
     }
-    if (br.arch) {
-      for (const s of [-1, 1]) {
-        const ox = nx * s * (w / 2 - 0.15), oz = nz * s * (w / 2 - 0.15);
-        const archH = Math.min(40, L * 0.16), segs = 16;
-        for (let k = 0; k < segs; k++) {
-          const t0 = k / segs, t1 = (k + 1) / segs;
-          const y0 = Math.sin(Math.PI * t0) * archH + bridgeHeightAt(br, t0 * L), y1 = Math.sin(Math.PI * t1) * archH + bridgeHeightAt(br, t1 * L);
-          const segL = Math.hypot((t1 - t0) * L, y1 - y0);
-          box(ax + ux * L * (t0 + t1) / 2 + ox, Math.min(y0, y1), az + uz * L * (t0 + t1) / 2 + oz, segL, Math.abs(y1 - y0) + 1.2, 1.2, ang, archCol);
+    nodes.set(id, N);
+    return N;
+  };
+  /** A joint that's all under a wider deck: drawn whole, just under that deck's surface. */
+  const sunk = (N) => {
+    const a = N.over(-N.hw + 0.05) ?? N.over(0) ?? N.h, b = N.over(N.hw - 0.05) ?? N.over(0) ?? N.h;
+    return { ...N, yLo: a, yHi: b, freeL: false, freeR: false, sunk: true };
+  };
+  const at = (N, s, y) => [N.x + N.n[0] * s, y, N.z + N.n[1] * s];
+  /** The deck's own surface at a joint, s metres out from the middle: [its height, what it's drawn over that]. */
+  const core = (N, s) => {
+    if (N.sunk) return [N.yLo + (N.yHi - N.yLo) * (s + N.hw) / (2 * N.hw), DECK_TOP - 0.06];
+    if (N.yLo !== null && s <= N.loB + 1e-6) return [N.yLo, DECK_TOP - 0.04];
+    if (N.yHi !== null && s >= N.hiB - 1e-6) return [N.yHi, DECK_TOP - 0.04];
+    const a = N.yLo ?? N.h, b = N.yHi ?? N.h, f = N.hiB > N.loB ? (s - N.loB) / (N.hiB - N.loB) : 0;
+    return [a + (b - a) * f, DECK_TOP];
+  };
+  /** The driving surface there: the deck, or the ground where that's higher (the engine stands things on whichever is). */
+  const topY = (N, s) => {
+    const [y, off] = core(N, s);
+    return Math.max(y, groundH(N.x + N.n[0] * s, N.z + N.n[1] * s) + 0.01) + off;
+  };
+  /** A point of the surface between two joints: u of the way from s = sa at A to sb at B, dy over it. */
+  const between = (A, B, sa, sb, u, dy = 0) => {
+    const x = A.x + A.n[0] * sa + (B.x + B.n[0] * sb - A.x - A.n[0] * sa) * u, z = A.z + A.n[1] * sa + (B.z + B.n[1] * sb - A.z - A.n[1] * sa) * u;
+    const [ya, oa] = core(A, sa), [yb, ob] = core(B, sb);
+    return [x, Math.max(ya + (yb - ya) * u, groundH(x, z) + 0.01) + oa + (ob - oa) * u + dy, z];
+  };
+  const cellsOut = new Map();
+  const cellOf = (p) => {
+    const i = Math.floor((p.ax + p.ux * p.L / 2) / cell), j = Math.floor((p.az + p.uz * p.L / 2) / cell), ck = i * 100000 + j;
+    let C = cellsOut.get(ck);
+    if (!C) cellsOut.set(ck, C = { x: (i + 0.5) * cell, z: (j + 0.5) * cell, pos: [], col: [], road: new Geo(), walk: new Geo(), curb: new Geo(), paint: new DeckPaint() });
+    return C;
+  };
+  const PARAPET = color('#a9a69e'), FASCIA = color('#8f959b'), UNDER = color('#757a80'), PIER = color('#c9c2b2');
+  const BALLAST = color('#8a857b');
+  const [aw, ah] = LAYER_M[LAYER.asphalt], [sw, sh] = LAYER_M[LAYER.sidewalk];
+  const KERB = 0.15;               // the sidewalk over the roadway
+
+  for (const p of list) {
+    let A = nodeOf(p, 0), B = nodeOf(p, 1);
+    if (A.hidden && B.hidden) continue;
+    if (A.hidden) A = sunk(A);
+    if (B.hidden) B = sunk(B);
+    const C = cellOf(p);
+    const tri = (a, b, c, col) => { for (const v of [a, b, c]) { C.pos.push(v[0], v[1], v[2]); C.col.push(col[0], col[1], col[2]); } };
+    const quad = (a, b, c, d, col) => { tri(a, b, c, col); tri(a, c, d, col); };
+    const foot = p.w0 <= 5, rail = p.w0 === 9, freeway = p.w0 === 29 || p.w0 === 25 || p.w0 === 13;
+    const s0 = p.s0, s1 = p.s0 + p.L;
+    // The surface, in strips no more than 5 m across so a wide deck on a hillside follows it (and one each side that's
+    // in under a wider deck). A piece that's on the ground, or nearly, is laid in squares of 3 m, much as the streets are,
+    // along it too (nt), so the ground between its corners doesn't come up through it.
+    const clear = (N, M, f, u) => {
+      const sn = N.lo + (N.hi - N.lo) * f, sm = M.lo + (M.hi - M.lo) * f;
+      const x = N.x + N.n[0] * sn + (M.x + M.n[0] * sm - N.x - N.n[0] * sn) * u, z = N.z + N.n[1] * sn + (M.z + M.n[1] * sm - N.z - N.n[1] * sn) * u;
+      return core(N, sn)[0] + (core(M, sm)[0] - core(N, sn)[0]) * u - groundH(x, z);
+    };
+    const low = [0, 0.5, 1].some((u) => [0, 0.25, 0.5, 0.75, 1].some((f) => clear(A, B, f, u) < 0.35));
+    const nt = low ? Math.max(1, Math.ceil(p.L / 3)) : 1;
+    const m = Math.max(1, Math.ceil(Math.max(A.hiB - A.loB, B.hiB - B.loB) / (low ? 3 : 5)));
+    const across = (N) => [N.lo, ...Array.from({ length: m + 1 }, (_, j) => N.loB + (N.hiB - N.loB) * j / m), N.hi];
+    const sa = across(A), sb = across(B);
+    const col = freeway ? ASPHALT.freeway : p.w0 >= 15 ? ASPHALT.major : ASPHALT.local;
+    for (let j = 0; j < m + 2; j++) {
+      const a0 = sa[j], a1 = sa[j + 1], b0 = sb[j], b1 = sb[j + 1];
+      if (a1 - a0 < 1e-6 && b1 - b0 < 1e-6) continue;
+      for (let i = 0; i < nt; i++) {
+        const u0 = i / nt, u1 = (i + 1) / nt, t0 = s0 + p.L * u0, t1 = s0 + p.L * u1;
+        const a = between(A, B, a0, b0, u0), b = between(A, B, a0, b0, u1), c = between(A, B, a1, b1, u1), d = between(A, B, a1, b1, u0);
+        if (rail) quad(a, b, c, d, BALLAST);
+        else if (foot) upQuad(C.walk, a, b, c, d, [t0 / sw, a0 / sh], [t1 / sw, b0 / sh], [t1 / sw, b1 / sh], [t0 / sw, a1 / sh], LAYER.sidewalk, WALK);
+        else upQuad(C.road, a, b, c, d, [a[0] / aw, a[2] / ah], [b[0] / aw, b[2] / ah], [c[0] / aw, c[2] / ah], [d[0] / aw, d[2] / ah], LAYER.asphalt, col);
+      }
+    }
+    // How far the deck is over the ground at its edges: on the ground it has no parapet, fascia or underside
+    const base = (N, s) => topY(N, s) - DECK_TOP, up = (N, s) => base(N, s) - groundH(N.x + N.n[0] * s, N.z + N.n[1] * s);
+    const depth = foot ? 0.4 : 0.9;
+    let aloft = false;
+    for (const sg of [-1, 1]) {
+      const ea = sg < 0 ? A.lo : A.hi, eb = sg < 0 ? B.lo : B.hi;
+      const high = up(A, ea) > 0.5 || up(B, eb) > 0.5;
+      aloft = aloft || up(A, ea) > 1 || up(B, eb) > 1;
+      if (!(sg < 0 ? A.freeL && B.freeL : A.freeR && B.freeR)) continue;
+      const P = (N, e, inset, dy) => at(N, e - sg * inset, topY(N, e - sg * inset) + dy);
+      const walked = !foot && !rail && !freeway && p.w0 >= 11;
+      if (walked) {
+        // A sidewalk behind its curb, up to the parapet (or the deck's edge, on the ground)
+        const out = high ? 0.3 : 0;
+        for (let i = 0; i < nt; i++) {
+          const u0 = i / nt, u1 = (i + 1) / nt, t0 = (s0 + p.L * u0) / sw, t1 = (s0 + p.L * u1) / sw;
+          const Q = (u, inset, dy) => between(A, B, ea - sg * inset, eb - sg * inset, u, dy);
+          upQuad(C.curb, Q(u0, 1.5, KERB), Q(u1, 1.5, KERB), Q(u1, 1.3, KERB), Q(u0, 1.3, KERB), [t0, 0], [t1, 0], [t1, 0.2 / sh], [t0, 0.2 / sh], LAYER.sidewalk, CURB);
+          const f0 = Q(u0, 1.5, 0), f1 = Q(u1, 1.5, 0), f2 = Q(u1, 1.5, KERB), f3 = Q(u0, 1.5, KERB);
+          // (its face, towards the roadway)
+          if (sg > 0) C.curb.quad(f1, f0, f3, f2, [t1, 0], [t0, 0], [t0, KERB / sh], [t1, KERB / sh], LAYER.sidewalk, CURB);
+          else C.curb.quad(f0, f1, f2, f3, [t0, 0], [t1, 0], [t1, KERB / sh], [t0, KERB / sh], LAYER.sidewalk, CURB);
+          upQuad(C.walk, Q(u0, 1.3, KERB), Q(u1, 1.3, KERB), Q(u1, out, KERB), Q(u0, out, KERB), [t0, 0], [t1, 0], [t1, (1.3 - out) / sh], [t0, (1.3 - out) / sh], LAYER.sidewalk, WALK);
         }
+      }
+      if (!high) continue;
+      // The parapet (a freeway's barrier, a footbridge's railing), its outer face running on down as the fascia
+      const [pw, ph, pc] = foot ? [0.15, 1.1, PARAPET] : freeway ? [0.45, 0.85, PARAPET] : [0.3, walked ? 1.05 : 0.9, PARAPET];
+      const lift = walked ? KERB : 0;
+      const ia = P(A, ea, pw, lift), ib = P(B, eb, pw, lift), ta = P(A, ea, pw, ph), tb = P(B, eb, pw, ph);
+      const oa = at(A, ea, ta[1]), ob = at(B, eb, tb[1]), da = at(A, ea, base(A, ea)), db = at(B, eb, base(B, eb));
+      quad(ia, ib, tb, ta, scaled(pc, 0.92));
+      quad(ta, tb, ob, oa, pc);
+      quad(oa, ob, db, da, scaled(pc, 0.86));
+      quad(da, db, at(B, eb, db[1] - depth), at(A, ea, da[1] - depth), FASCIA);
+    }
+    if (aloft) {
+      quad(at(A, A.lo, base(A, A.lo) - depth), at(B, B.lo, base(B, B.lo) - depth), at(B, B.hi, base(B, B.hi) - depth), at(A, A.hi, base(A, A.hi) - depth), UNDER);
+      // The end of a deck that stops in the air is closed off
+      for (const [N, end] of [[A, p.first], [B, p.last]]) {
+        if (end && !N.sunk) quad(at(N, N.lo, base(N, N.lo) + DECK_TOP), at(N, N.hi, base(N, N.hi) + DECK_TOP), at(N, N.hi, base(N, N.hi) - depth), at(N, N.lo, base(N, N.lo) - depth), FASCIA);
+      }
+    }
+    // The lines, where the whole roadway is this deck's: a freeway's edge lines and lanes, a main street's double yellow
+    const whole = (N) => !N.sunk && N.loB === -N.hw && N.hiB === N.hw;
+    if (!foot && !rail && whole(A) && whole(B)) {
+      const line = (fa, fb, width, col, period = 1, duty = 1) => {
+        for (let i = 0; i < nt; i++) {
+          const k = [];
+          for (const u of [i / nt, (i + 1) / nt]) {
+            const nx = A.n[0] + (B.n[0] - A.n[0]) * u, nz = A.n[1] + (B.n[1] - A.n[1]) * u;
+            for (const e of [-1, 1]) k.push([...between(A, B, fa + e * width / 2, fb + e * width / 2, u, PAINT_Y - ROAD_Y), s0 + p.L * u, nx * e * width / 2, nz * e * width / 2]);
+          }
+          C.paint.strip(k, col, period, duty);
+        }
+      };
+      const ra = A.hw - 1.5, rb = B.hw - 1.5, lanes = Math.max(1, Math.round((p.w0 - 3) / 3.6));
+      if (freeway) {
+        if (A.freeL && B.freeL) line(-ra + 0.375, -rb + 0.375, 0.15, PAINT_YELLOW);
+        if (A.freeR && B.freeR) line(ra - 0.375, rb - 0.375, 0.15, PAINT_WHITE);
+        for (let k = 1; k < lanes; k++) line(-ra + 2 * ra * k / lanes, -rb + 2 * rb * k / lanes, 0.13, PAINT_WHITE, 12, 0.25);
+      } else if (p.w0 >= 15) {
+        for (const e of [-1, 1]) line(e * 0.135, e * 0.135, 0.13, PAINT_YELLOW);
+        if (lanes >= 4) for (const e of [-1, 1]) line(e * ra / 2, e * rb / 2, 0.13, PAINT_WHITE, 12, 0.25);
+      }
+    }
+    // A pier under the joint: columns up to a cap beam under the deck
+    if (p.pier && !A.hidden) {
+      const g = groundH(p.ax, p.az), top = p.ha - depth;
+      if (top - g > 2.5) {
+        const ang = Math.atan2(p.uz, p.ux), wide = 2 * A.hw, capH = foot ? 0.4 : 1.1;
+        const box = (cx, cy, cz, sx, sy, sz) => {
+          const cs = Math.cos(ang), sn = Math.sin(ang), hx = sx / 2, hz = sz / 2;
+          const V = (x, y, z) => [cx + x * cs - z * sn, cy + y, cz + x * sn + z * cs];
+          const v = [V(-hx, 0, -hz), V(hx, 0, -hz), V(hx, 0, hz), V(-hx, 0, hz), V(-hx, sy, -hz), V(hx, sy, -hz), V(hx, sy, hz), V(-hx, sy, hz)];
+          [[0, 3, 2, 1], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]].forEach(([a, b, c, d], k) => quad(v[a], v[b], v[c], v[d], scaled(PIER, k === 0 ? 0.7 : k % 2 ? 0.86 : 0.95)));
+        };
+        box(p.ax, top - capH, p.az, foot ? 0.6 : 1.5, capH, wide * 0.86);
+        const cols = wide >= 15 ? [-wide * 0.25, wide * 0.25] : [0], thick = foot ? 0.5 : 1.3;
+        for (const o of cols) box(p.ax - p.uz * o, g - 1, p.az + p.ux * o, thick, top - capH - g + 1, foot ? 0.5 : wide >= 15 ? 1.6 : Math.min(wide * 0.4, 2.6));
       }
     }
   }
-  if (!pos.length) return null;
-  const position = Float32Array.from(pos);
-  return { position, normal: flatNormals(position), color: Float32Array.from(col) };
+  const out = [];
+  for (const C of cellsOut.values()) {
+    const position = Float32Array.from(C.pos);
+    out.push({
+      x: C.x, z: C.z, body: position.length ? { position, normal: flatNormals(position), color: Float32Array.from(C.col) } : null,
+      road: C.road.arrays(), walk: C.walk.arrays(), curb: C.curb.arrays(), paint: C.paint.arrays(),
+    });
+  }
+  return out;
 }

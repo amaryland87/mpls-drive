@@ -130,6 +130,12 @@ async function initApp() {
   const touchControls = new TouchControls(controllerManager);
   const soundButton = document.getElementById('btn-sound');
   // The traffic on Minneapolis's streets (mpls-traffic.js): Slop New York's traffic.js on a road network from them
+  // [Mpls] The tiles where the player starts are asked for first: the worker fetches and builds them while this
+  // thread works out the traffic's lanes
+  {
+    const p = controllerManager.getActiveEntity().position;
+    city.prefetch(p.x, p.z);
+  }
   const { trafficSystem, highwayTraffic, streetDetails } = await createMplsTraffic(scene, './data/roads.json');
   markInit('traffic');
   // [Mpls] The Blue and Green Line trains, to Metro Transit's timetable (mpls-transit.js)
