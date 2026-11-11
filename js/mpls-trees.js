@@ -1,7 +1,7 @@
 // Mpls Drive's tree field: the LiDAR survey's trees grown as Slop New York's procedural planes, honey locusts and
 // elms (trees.js, with NYC's own TSL tree material from tsl-materials.js), each fitted to its measured height
 // and spread. Trees are added and dropped a map piece at a time and regrouped by species, variant and level of detail
-// into instanced meshes that follow the camera.
+// into instanced meshes that follow the camera, each tree dissolving from one level into the next.
 import * as THREE from 'three/webgpu';
 import { createLeafAtlas, buildTreeGeometries, TREE_SPECIES } from './trees.js';
 import { createTreeMaterial } from './tsl-materials.js';
@@ -20,11 +20,20 @@ export function createTreeField(opts = {}) {
   const LOD_NEAR = opts.lowPower ? 35 : 70;      // full detail within (m)
   const LOD_MID = opts.lowPower ? 140 : 260;     // coarse cards and branches within; whole-crown cards beyond
   const MAX_D = opts.lowPower ? 750 : 1150;
-  const HYST = 6;
+  // [Mpls] A tree doesn't jump from one level to the next: over FADE metres past each of those distances it's drawn
+  // at both, one dissolving into the other (createTreeMaterial's fade), and it dissolves away over the last FADE_OUT
+  // metres before MAX_D, so the far trees come and go softly too. A tree is in a level's mesh a little before it
+  // shows there (EDGE: the camera moves a few metres between regroupings).
+  const FADE = [opts.lowPower ? 15 : 25, opts.lowPower ? 40 : 60], FADE_OUT = opts.lowPower ? 100 : 160, EDGE = 8;
+  const RANGE = [[-Infinity, LOD_NEAR + FADE[0] + EDGE], [LOD_NEAR - EDGE, LOD_MID + FADE[1] + EDGE], [LOD_MID - EDGE, MAX_D]];
   const group = new THREE.Group();
   group.name = 'Trees';
   const atlas = createLeafAtlas();
-  const mat = createTreeMaterial(atlas.texture);
+  const mats = [
+    createTreeMaterial(atlas.texture, { far: [LOD_NEAR, LOD_NEAR + FADE[0]] }),
+    createTreeMaterial(atlas.texture, { near: [LOD_NEAR, LOD_NEAR + FADE[0]], far: [LOD_MID, LOD_MID + FADE[1]] }),
+    createTreeMaterial(atlas.texture, { near: [LOD_MID, LOD_MID + FADE[1]], far: [MAX_D - FADE_OUT, MAX_D - EDGE] }),
+  ];
 
   const geos = TREE_SPECIES.map((_, s) => [0, 1].map((v) => buildTreeGeometries(s, v, atlas.tileMeters)));
   const fit = geos.map((v) => {
@@ -33,8 +42,8 @@ export function createTreeField(opts = {}) {
   });
   const meshes = [];
   const meshIndex = TREE_SPECIES.map((sp, s) => ({
-    l: [0, 1].map((v) => [0, 1].map((l) => meshes.push({ geo: geos[s][v][l] }) - 1)),
-    far: meshes.push({ geo: geos[s][0][2] }) - 1,
+    l: [0, 1].map((v) => [0, 1].map((l) => meshes.push({ geo: geos[s][v][l], lod: l }) - 1)),
+    far: meshes.push({ geo: geos[s][0][2], lod: 2 }) - 1,
   }));
   const instanced = meshes.map((m) => {
     const geo = new THREE.BufferGeometry();
@@ -42,7 +51,8 @@ export function createTreeField(opts = {}) {
     geo.setIndex(m.geo.index);
     geo.boundingSphere = m.geo.boundingSphere;
     geo.setAttribute('aTreeData', new THREE.InstancedBufferAttribute(new Float32Array(4), 4));
-    const mesh = new THREE.InstancedMesh(geo, mat, 1);
+    geo.setAttribute('aTreePos', new THREE.InstancedBufferAttribute(new Float32Array(3), 3));
+    const mesh = new THREE.InstancedMesh(geo, mats[m.lod], 1);
     mesh.count = 0;
     mesh.visible = false;
     mesh.frustumCulled = false;                  // instances surround the camera: the levels do the culling
@@ -82,7 +92,7 @@ export function createTreeField(opts = {}) {
   function gather() {
     let N = 0;
     for (const P of pieces.values()) N += P.N;
-    all = { N, list: [...pieces.values()], lod: new Uint8Array(N).fill(255) };
+    all = { N, list: [...pieces.values()], lod: new Uint8Array(N) };       // lod: a bit for each level the tree's drawn at
     const caps = new Array(instanced.length).fill(0);
     for (const P of all.list) for (let i = 0; i < P.N * 3; i++) caps[P.meshOf[i]]++;
     instanced.forEach((mesh, k) => {
@@ -90,6 +100,7 @@ export function createTreeField(opts = {}) {
       const cap = Math.max(1, Math.ceil(caps[k] * 1.3));
       mesh.instanceMatrix = new THREE.InstancedBufferAttribute(new Float32Array(cap * 16), 16);
       mesh.geometry.setAttribute('aTreeData', new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4));
+      mesh.geometry.setAttribute('aTreePos', new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3));
     });
     last.set(Infinity, Infinity, Infinity);
   }
@@ -99,11 +110,14 @@ export function createTreeField(opts = {}) {
     let o = 0;
     for (const P of all.list) {
       for (let i = 0; i < P.N; i++) {
-        const l = all.lod[o + i];
-        if (l === 255) continue;
-        const mi = P.meshOf[i * 3 + l], mesh = instanced[mi], c = counts[mi]++;
-        mesh.instanceMatrix.array.set(P.mats.subarray(i * 16, i * 16 + 16), c * 16);
-        mesh.geometry.attributes.aTreeData.array.set(P.data.subarray(i * 4, i * 4 + 4), c * 4);
+        const bits = all.lod[o + i];
+        for (let l = 0; l < 3; l++) {
+          if (!(bits & (1 << l))) continue;
+          const mi = P.meshOf[i * 3 + l], mesh = instanced[mi], c = counts[mi]++;
+          mesh.instanceMatrix.array.set(P.mats.subarray(i * 16, i * 16 + 16), c * 16);
+          mesh.geometry.attributes.aTreeData.array.set(P.data.subarray(i * 4, i * 4 + 4), c * 4);
+          mesh.geometry.attributes.aTreePos.array.set(P.pos.subarray(i * 3, i * 3 + 3), c * 3);
+        }
       }
       o += P.N;
     }
@@ -112,6 +126,7 @@ export function createTreeField(opts = {}) {
       if (n > 0) {
         mesh.instanceMatrix.needsUpdate = true;
         mesh.geometry.attributes.aTreeData.needsUpdate = true;
+        mesh.geometry.attributes.aTreePos.needsUpdate = true;
       }
       mesh.count = n;
       mesh.visible = n > 0;
@@ -128,10 +143,7 @@ export function createTreeField(opts = {}) {
       for (let i = 0; i < P.N; i++, o++) {
         const dx = P.pos[i * 3] - cam.x, dy = P.pos[i * 3 + 1] - cam.y, dz = P.pos[i * 3 + 2] - cam.z;
         const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        const cur = all.lod[o] === 255 ? 3 : all.lod[o];
-        let next = d < LOD_NEAR ? 0 : d < LOD_MID ? 1 : d < MAX_D ? 2 : 3;
-        if (Math.abs(next - cur) === 1 && Math.abs(d - [LOD_NEAR, LOD_MID, MAX_D][Math.min(next, cur)]) < HYST) next = cur;
-        const v = next === 3 ? 255 : next;
+        const v = (d < RANGE[0][1] ? 1 : 0) | (d > RANGE[1][0] && d < RANGE[1][1] ? 2 : 0) | (d > RANGE[2][0] && d < RANGE[2][1] ? 4 : 0);
         if (v !== all.lod[o]) { all.lod[o] = v; changed = true; }
       }
     }

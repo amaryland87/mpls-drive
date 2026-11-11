@@ -948,10 +948,13 @@ class ThirdPersonControllerManager {
           if (vn > 0.5) {
             const headOn = Math.abs(sinH * nx + cosH * nz);
             const sideDot = cosH * nx - sinH * nz;
-            carEntity.vx = (carEntity.vx || 0) + nx * vn * 0.42;
-            carEntity.vz = (carEntity.vz || 0) + nz * vn * 0.42;
+            // [Mpls] Against a tree or a post the car all but stops where it hit (it took a wall's bounce, a quarter
+            // of its speed back and as much again sideways, and was thrown back down the street)
+            const rebound = c.post ? 0.06 : 0.42;
+            carEntity.vx = (carEntity.vx || 0) + nx * vn * rebound;
+            carEntity.vz = (carEntity.vz || 0) + nz * vn * rebound;
             if (headOn > 0.72) {
-              carEntity.speed = -carEntity.speed * 0.25;
+              carEntity.speed = -carEntity.speed * (c.post ? 0.04 : 0.25);
             } else {
               carEntity.speed *= (1.0 - 0.62 * headOn);
               carEntity.angularVel = (carEntity.angularVel || 0) + sideDot * (sinH * nx + cosH * nz >= 0 ? -1 : 1) * Math.min(3.2, vn * 0.22);
