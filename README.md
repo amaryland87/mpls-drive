@@ -74,7 +74,10 @@ footway beside a road) brought level. They're drawn (`bridgeMeshes`, built in th
 them: asphalt, sidewalks behind curbs and the street's lines in the streets' own materials, a parapet only along an
 outside edge, piers under a cap beam. Where decks overlap the widest is drawn whole and the others only where they
 stick out from under it; a deck lying on a hillside follows the ground. A deck end that was eased down into a dip in
-the surveyed ground comes back up to the path just past it (the Stone Arch Bridge's two ends). Fences and walls
+the surveyed ground comes back up to the path just past it, and one that still stops short of the path that leads
+onto it (the ground a metre or two down at the very end, at the top of a bank) gets an approach slab on to where the
+ground comes up to it. A bridge modelled whole (the Stone Arch Bridge) has its deck level on the model's and only its
+surface drawn: the model has the walls, railings and piers. Fences and walls
 mapped along what a bridge crosses (the Midtown Greenway's trench) aren't drawn across its roadway, nor solid there.
 Nothing is solid where it isn't drawn: a street light is solid where `fitLamps` put it, and not at all if it was
 thinned out.

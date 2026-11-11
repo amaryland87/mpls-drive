@@ -1294,6 +1294,9 @@ export function fitLamps(detail, T, sidewalkAt) {
 const DECK_JOIN = 40;          // metres a deck eases over to meet another (or the ground)
 const DECK_MERGE = 1.0;        // decks within this height of one another where they overlap are one roadway
 const DECK_TOP = 0.06;         // the driving surface over a deck's height (mpls-city.js surfaceY)
+// The bridges modelled whole as heroes (tools/heroes/): where the model stands (its hx.x, hx.z in the tiles) and its
+// deck over the ground there. The Stone Arch Bridge (model_stone_arch.py).
+const HERO_DECKS = [{ x: 327.89, z: -1607.17, deck: 16.22 }];
 export function bridgeList(br8) {
   const chains = [];
   let c = null;
@@ -1521,10 +1524,52 @@ export function bridgeList(br8) {
     }
   }
 
+  // A bridge modelled whole (HERO_DECKS: the Stone Arch Bridge) has its deck where the model's is, level from end to
+  // end, and is marked: the model has the walls, the railings and the piers.
+  for (const H of HERO_DECKS) {
+    let best = null, bd = 60;
+    for (const d of decks) {
+      if (Math.max(...d.w) > 5) continue;
+      for (let k = 0; k < d.x.length; k++) { const r = Math.hypot(d.x[k] - H.x, d.z[k] - H.z); if (r < bd) { bd = r; best = d; } }
+    }
+    if (!best) continue;
+    best.hero = true;
+    best.h.fill(groundH(H.x, H.z) + H.deck - DECK_TOP + 0.03);
+  }
+
+  // An approach slab at an end that stops short. The surveyed ground, a node every 10 m, can be a metre or two down
+  // at the very end of a deck that lands at the top of a bank and only reach the deck's height a few metres on, where
+  // the path that leads onto the bridge is: the deck's end hangs in the air with a gap to the path. Such an end gets
+  // one more piece, straight on to where the ground comes up to it (or as near as it comes within 16 m), which is
+  // drawn and stood on like the rest of the deck. (ext marks those pieces: not part of a modelled bridge.)
+  decks.forEach((d, di) => {
+    d.ext = new Uint8Array(d.x.length);
+    for (const end of [0, -1]) {
+      const n = d.x.length, k = end === 0 ? 0 : n - 1, j = end === 0 ? 1 : n - 2, h = d.h[k];
+      const gap = h - groundH(d.x[k], d.z[k]);
+      if (gap < 0.15 || gap > 3 || endCount.get(key(d.x[k], d.z[k])) > 1 || deckUnder(d.x[k], d.z[k], di, h) !== null) continue;
+      const len = Math.hypot(d.x[k] - d.x[j], d.z[k] - d.z[j]), ox = (d.x[k] - d.x[j]) / len, oz = (d.z[k] - d.z[j]) / len;
+      let reach = 0, best = -Infinity;
+      for (let t = 2; t <= 16; t++) {
+        const g = groundH(d.x[k] + ox * t, d.z[k] + oz * t);
+        if (g > best + 0.02) { best = g; reach = t; }
+        if (g >= h - 0.1) break;
+      }
+      if (best < h - 1.2) continue;                      // nothing up there to run on to
+      const x = d.x[k] + ox * reach, z = d.z[k] + oz * reach, hh = Math.min(h, best), w = d.w[end === 0 ? 0 : n - 2];
+      if (end === 0) { d.x.unshift(x); d.z.unshift(z); d.h.unshift(hh); d.w.unshift(w); d.pier.unshift(0); d.ext = Uint8Array.from([1, ...d.ext]); }
+      else { d.x.push(x); d.z.push(z); d.h.push(hh); d.w.push(w); d.pier.push(0); d.ext = Uint8Array.from([...d.ext.subarray(0, n - 1), 1, 0]); }
+    }
+    const n = d.x.length;
+    d.cum = [0];
+    for (let k = 1; k < n; k++) d.cum.push(d.cum[k - 1] + Math.hypot(d.x[k] - d.x[k - 1], d.z[k] - d.z[k - 1]));
+    d.nw = d.x.map((_, k) => Math.max(d.w[Math.max(0, k - 1)], d.w[Math.min(n - 2, k)]));
+  });
+
   const out = [];
   decks.forEach((d, di) => {
     const n = d.x.length;
-    for (let k = 0; k < n; k++) d.h[k] = Math.max(d.h[k], groundH(d.x[k], d.z[k]));
+    if (!d.hero) for (let k = 0; k < n; k++) d.h[k] = Math.max(d.h[k], groundH(d.x[k], d.z[k]));
     // The way out to the side at each joint: the mitre between the pieces either side (or square, at a hairpin)
     const seg = [];
     for (let k = 0; k + 1 < n; k++) {
@@ -1545,7 +1590,7 @@ export function bridgeList(br8) {
         ax: d.x[k], az: d.z[k], ux, uz, L, w: Math.max(d.nw[k], d.nw[k + 1]), ha: d.h[k], hb: d.h[k + 1], pier: d.pier[k],
         na: (k > 0 && seg[k - 1].L >= 0.01 && mitre(seg[k - 1], seg[k])) || own,
         nb: (k + 2 < n && seg[k + 1].L >= 0.01 && mitre(seg[k], seg[k + 1])) || own,
-        wa: d.nw[k], wb: d.nw[k + 1], w0: d.w[k], d: di, k, s0: d.cum[k], rank, first: k === 0, last: k === n - 2,
+        wa: d.nw[k], wb: d.nw[k + 1], w0: d.w[k], d: di, k, s0: d.cum[k], rank, first: k === 0, last: k === n - 2, hero: !!d.hero && !d.ext[k],
       });
     }
   });
@@ -1721,6 +1766,7 @@ export function bridgeMeshes(list, cell = 2000) {
     const base = (N, s) => topY(N, s) - DECK_TOP, up = (N, s) => base(N, s) - groundH(N.x + N.n[0] * s, N.z + N.n[1] * s);
     const depth = foot ? 0.4 : 0.9;
     let aloft = false;
+    if (p.hero) continue;                    // the model has its walls, railings, arches and piers
     for (const sg of [-1, 1]) {
       const ea = sg < 0 ? A.lo : A.hi, eb = sg < 0 ? B.lo : B.hi;
       const high = up(A, ea) > 0.5 || up(B, eb) > 0.5;
