@@ -897,7 +897,7 @@ export const PIECE = 500;
  * pieces' raw detail records, kept by the caller (the worker) for buildDetail. isStadium(b, x, z) picks out the
  * building another module draws.
  */
-export function buildTile(x0, z0, tile, data, isStadium) {
+export function buildTile(x0, z0, tile, data, isStadium, sidewalkAt = null) {
   const pieces = new Map();
   const pieceAt = (x, z) => {
     const n = tile / PIECE;
@@ -947,8 +947,22 @@ export function buildTile(x0, z0, tile, data, isStadium) {
   data.f.forEach((f) => {
     pieceAt(f[2], f[3]).f.push(f);
     for (let i = 0; i < f[1] - 1; i++) {
-      const top = Math.max(groundH(f[2 + i * 2], f[3 + i * 2]), groundH(f[4 + i * 2], f[5 + i * 2])) + FENCE_H[f[0]];
-      S.add(f[2 + i * 2], f[3 + i * 2], f[4 + i * 2], f[5 + i * 2], f[0] === 2 ? 0.45 : 0.1, top);
+      // (not where fenceGeo leaves it out, under a bridge's roadway: there'd be a wall there you can't see. It's
+      // walked 2 m at a time and only the stretches clear of the roadway are solid.)
+      const ax = f[2 + i * 2], az = f[3 + i * 2], bx = f[4 + i * 2], bz = f[5 + i * 2];
+      const top = Math.max(groundH(ax, az), groundH(bx, bz)) + FENCE_H[f[0]], r = f[0] === 2 ? 0.45 : 0.1;
+      const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / 2));
+      const clear = (k) => !onDeckRoadway(ax + (bx - ax) * k / n, az + (bz - az) * k / n, FENCE_H[f[0]] + 0.6, 1.5);
+      let from = -1;
+      for (let k = 0; k <= n; k++) {
+        const ok = clear(k);
+        if (ok && from < 0) from = k;
+        if (from >= 0 && (!ok || k === n)) {
+          const to = ok ? k : k - 1;
+          if (to > from || n === 1) S.add(ax + (bx - ax) * from / n, az + (bz - az) * from / n, ax + (bx - ax) * to / n, az + (bz - az) * to / n, r, top);
+          from = -1;
+        }
+      }
     }
   });
   for (let i = 0; i < data.s.length; i += 6) {
@@ -967,7 +981,24 @@ export function buildTile(x0, z0, tile, data, isStadium) {
   for (let i = 0; i < (data.lp || []).length; i += 4) {
     const l = data.lp.slice(i, i + 4);
     pieceAt(l[0] / 10, l[1] / 10).lp.push(l);
-    S.add(l[0] / 10, l[1] / 10, l[0] / 10, l[1] / 10, 0.14, groundH(l[0] / 10, l[1] / 10) + 6);
+  }
+  // (solid where they're drawn: fitLamps moves one that stands in a street past its curb, or takes it away, and a
+  // post left solid where it was mapped is one you can't see, in the street)
+  for (const T of pieces.values()) {
+    if (!T.lp.length) continue;
+    // (and only the ones that are drawn at all: buildDetail leaves out any within 22 m of one already standing)
+    const kept = [];
+    for (const [x10, z10, a100, style] of T.lp) {
+      const x = x10 / 10, z = z10 / 10;
+      if (kept.some((q) => Math.abs(q[0] - x) < 22 && Math.abs(q[1] - z) < 22 && Math.hypot(q[0] - x, q[1] - z) < 22)) continue;
+      kept.push([x, z, -a100 / 100, style]);
+    }
+    const fitted = { lamps: Float32Array.from(kept.flat()) };
+    if (sidewalkAt) fitLamps(fitted, T, sidewalkAt);
+    for (let k = 0; k < fitted.lamps.length; k += 4) {
+      const x = fitted.lamps[k], z = fitted.lamps[k + 1];
+      S.add(x, z, x, z, 0.14, groundH(x, z) + 6);
+    }
   }
   for (let i = 0; i < (data.fu || []).length; i += 4) {
     const f = data.fu.slice(i, i + 4), x = f[1] / 10, z = f[2] / 10, size = FURN_SIZE[f[0]];
@@ -1400,6 +1431,25 @@ export function bridgeList(br8) {
       }
     });
     for (const [d, end, off, span] of moves) ease(d, end, off, span);
+  }
+
+  // An end that was brought down into a dip: the survey's ground, a node every 10 m, can drop away at the very end of
+  // a deck (the top of the river bank) and be back up a few metres on, where the path that leads onto the bridge is,
+  // and the deck was eased down to the ground at its end: a dip to cross getting on and off (the Stone Arch Bridge's
+  // two ends, 2 m at the east one). Such an end comes back up to the ground just past it, no higher than the deck
+  // further in.
+  for (const d of decks) {
+    const n = d.x.length, L = d.cum[n - 1], span = Math.min(DECK_JOIN, L / 2);
+    for (const end of [0, -1]) {
+      const k = end === 0 ? 0 : n - 1, j = end === 0 ? 1 : n - 2;
+      if (endCount.get(key(d.x[k], d.z[k])) > 1 || deckUnder(d.x[k], d.z[k], decks.indexOf(d), d.h[k]) !== null) continue;
+      const ox = (d.x[k] - d.x[j]) / Math.hypot(d.x[k] - d.x[j], d.z[k] - d.z[j]), oz = (d.z[k] - d.z[j]) / Math.hypot(d.x[k] - d.x[j], d.z[k] - d.z[j]);
+      const beyond = Math.max(groundH(d.x[k] + ox * 5, d.z[k] + oz * 5), groundH(d.x[k] + ox * 9, d.z[k] + oz * 9));
+      let inner = -Infinity;
+      for (let i = 0; i < n; i++) if ((end === 0 ? d.cum[i] : L - d.cum[i]) <= span) inner = Math.max(inner, d.h[i]);
+      const up = Math.min(beyond, inner) - d.h[k];
+      if (up > 0.3 && d.h[k] - groundH(d.x[k], d.z[k]) < 0.5) ease(d, end, up, span);
+    }
   }
 
   // One roadway where decks overlap: each joint that has another deck over (or under) it within DECK_MERGE is drawn

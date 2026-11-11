@@ -685,6 +685,7 @@ function swayWeight(b, t) {
 
 // Leaf cards of one tree: lod 0 on every twig, lod 1 fewer & larger along the branches, lod 2 a shell of whole-crown
 // cards (far-canopy tile) round the crown ellipsoid
+const FULL = 3;
 function placeCards(sp, branches, lod, tileMeters, rng, crown) {
   const R = (a, b) => a + (b - a) * rng();
   const cards = [];
@@ -704,46 +705,47 @@ function placeCards(sp, branches, lod, tileMeters, rng, crown) {
   if (lod === 0) {
     for (const b of branches) {
       if (b.level !== 3) continue;
-      const n = sp.cards.perTwig;
+      // [Mpls] In full leaf: the sprays are mostly air (a tenth to a fifth of a card is leaf), and two to a twig left
+      // the crowns thin, so a twig carries FULL times as many, a little larger, from nearer its foot
+      const n = sp.cards.perTwig * FULL;
       for (let k = 0; k < n; k++) {
-        const t = lerp(0.4, 1.0, (k + R(0.3, 0.9)) / n);
+        const t = lerp(0.15, 1.0, (k + R(0.3, 0.9)) / n);
         const a = along(b, t);
         const { up, face } = orient(a.p, a.d, sp.cards.droop);
-        cards.push({ at: a.p, up, face, size: size * R(sp.cards.scale[0], sp.cards.scale[1]), tile: sp.tile });
+        cards.push({ at: a.p, up, face, size: size * R(sp.cards.scale[0], sp.cards.scale[1]) * 1.25, tile: sp.tile });
       }
     }
-    // a card at the end of every branch fills the gap between its twigs
+    // cards along every branch and at its end fill the gaps between its twigs
     for (const b of branches) {
       if (b.level !== 2) continue;
-      const a = along(b, 1);
-      const { up, face } = orient(a.p, a.d, sp.cards.droop);
-      cards.push({ at: a.p, up, face, size: size * R(0.9, 1.1), tile: sp.tile });
+      for (const t of [0.35, 0.6, 0.8, 1]) {
+        const a = along(b, Math.min(1, t + R(-0.08, 0.06)));
+        const { up, face } = orient(a.p, a.d, sp.cards.droop);
+        cards.push({ at: a.p, up, face, size: size * R(1.2, 1.5), tile: sp.tile });
+      }
     }
   } else if (lod === 1) {
     for (const b of branches) {
       if (b.level !== 2) continue;
-      for (const t of [0.42, 0.72, 1.0]) {
+      // [Mpls] (as full as the near level: twice the cards, larger)
+      for (const t of [0.3, 0.45, 0.6, 0.74, 0.88, 1.0]) {
         const a = along(b, Math.min(1, t + R(-0.06, 0.04)));
         const { up, face } = orient(a.p, a.d, sp.cards.droop);
-        const at = a.p.clone().addScaledVector(outward(a.p), 0.35);
-        cards.push({ at, up, face, size: size * R(1.35, 1.6), tile: sp.tile });
+        const at = a.p.clone().addScaledVector(outward(a.p), R(-0.5, 0.6));
+        cards.push({ at, up, face, size: size * R(1.9, 2.4), tile: sp.tile });
       }
     }
-  }
-  // [Mpls] The near levels have the far level's whole-crown cards too, smaller and further in: a leafy core behind
-  // the sprays, so a tree is as full close to as it is from across the park and keeps its look from level to level
-  // (sprays alone left the near trees thin, and they filled out all at once on dropping to the far level)
-  {
+  } else {
     // Fibonacci directions over the crown, fewer underneath; cards centred just inside the shell, facing out
-    const n = lod === 2 ? 18 : 12, depth = lod === 2 ? 0.58 : 0.4;
+    const n = 18;
     const meanR = (crown.R.x + crown.R.y + crown.R.z) / 3;
-    const s = Math.max(meanR * 1.25, 2.4) * (lod === 2 ? 1 : 0.8);
+    const s = Math.max(meanR * 1.25, 2.4);
     for (let i = 0; i < n; i++) {
       const y = 1 - (i + 0.5) / n * 1.55; // 1 .. -0.55
       const r = Math.sqrt(Math.max(0, 1 - y * y));
       const ph = i * 2.39996 + R(-0.2, 0.2);
       const dir = new V3(Math.cos(ph) * r, y, Math.sin(ph) * r);
-      const center = crown.C.clone().add(dir.clone().multiply(crown.R).multiplyScalar(depth));
+      const center = crown.C.clone().add(dir.clone().multiply(crown.R).multiplyScalar(0.58));
       const face = dir.clone().add(new V3(R(-0.25, 0.25), R(-0.25, 0.25), R(-0.25, 0.25))).normalize();
       let up = new V3(0, 1, 0).addScaledVector(face, -face.y);
       if (up.lengthSq() < 1e-3) up = new V3(1, 0, 0);

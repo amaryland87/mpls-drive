@@ -73,12 +73,16 @@ height there, and decks that overlap at one height (a divided road's two roadway
 footway beside a road) brought level. They're drawn (`bridgeMeshes`, built in the worker) as the street that leads onto
 them: asphalt, sidewalks behind curbs and the street's lines in the streets' own materials, a parapet only along an
 outside edge, piers under a cap beam. Where decks overlap the widest is drawn whole and the others only where they
-stick out from under it; a deck lying on a hillside follows the ground. Fences and walls mapped along what a bridge
-crosses (the Midtown Greenway's trench) aren't drawn across its roadway.
+stick out from under it; a deck lying on a hillside follows the ground. A deck end that was eased down into a dip in
+the surveyed ground comes back up to the path just past it (the Stone Arch Bridge's two ends). Fences and walls
+mapped along what a bridge crosses (the Midtown Greenway's trench) aren't drawn across its roadway, nor solid there.
+Nothing is solid where it isn't drawn: a street light is solid where `fitLamps` put it, and not at all if it was
+thinned out.
 
 Trees dissolve from one level of detail into the next over 25 m and 60 m, and away at the far end, instead of
-switching (`js/mpls-trees.js`, `createTreeMaterial`'s fade), and the near levels have the far level's leafy core
-behind their sprays, so a tree keeps its look as it comes closer. The car all but stops against a tree or a post
+switching (`js/mpls-trees.js`, `createTreeMaterial`'s fade), and the near levels are in full leaf (three times the
+sprays to a twig, and more along the branches: `js/trees.js` placeCards), so a tree keeps its look as it comes
+closer. The car all but stops against a tree or a post
 rather than bouncing back off it as off a wall (`js/controllers.js`).
 
 Loading: three.js and the city's index, ground and street graph are preloaded from index.html, and the tiles round

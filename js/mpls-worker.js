@@ -113,7 +113,7 @@ async function loadTile({ key, x0, z0, tile, small }) {
   const cell = (v, o) => Math.min(SURF_N - 1, Math.max(0, Math.floor((v - o) / tile * SURF_N)));
   const at = (x, z) => cell(z, z0) * SURF_N + cell(x, x0);
   fitTrees(data, x0, z0, tile, { wetAt: (x, z) => wet[at(x, z)] === 1, grassAt: (x, z) => surface[at(x, z)] === 0, sidewalkAt: await sidewalks, bridges });
-  const built = buildTile(x0, z0, tile, data, isStadium);
+  const built = buildTile(x0, z0, tile, data, isStadium, await sidewalks);
   const atlas = data.sn.length ? signAtlas(data.sn) : null;
   tiles.set(key, { raw: built.raw, atlas });
   return {
